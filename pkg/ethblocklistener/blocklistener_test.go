@@ -217,9 +217,18 @@ func mockBlockRangeWithHash(mRPC *rpcbackendmocks.Backend, start, end uint64, mo
 	}
 }
 
+func TestBlockListenerConstructorFailMonitoredHeadLength(t *testing.T) {
+	_, err := NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
+		BlockCacheSize:      -1,
+		MonitoredHeadLength: -1,
+	}, &ffresty.Config{}, &wsclient.WSConfig{})
+	require.Regexp(t, "FF23072", err)
+}
+
 func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
 	_, err := NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
-		BlockCacheSize: -1,
+		BlockCacheSize:      -1,
+		MonitoredHeadLength: 1,
 	}, &ffresty.Config{}, &wsclient.WSConfig{})
 	require.Regexp(t, "FF23040", err)
 }
@@ -556,8 +565,8 @@ func TestBlockListenerReorgKeepLatestHeadInSameBatchValidHashFirst(t *testing.T)
 
 	// "Valid" (canonical) hash arrives first in the filter batch; the stale hash arrives after,
 	// forcing a rebuild to confirm the canonical chain.
-	block1001HashB := testBlockHashFor(1001)        // canonical — arrives first
-	block1001HashA := testBlockHashFor(1001, 1111)  // stale fork — arrives second
+	block1001HashB := testBlockHashFor(1001)       // canonical — arrives first
+	block1001HashA := testBlockHashFor(1001, 1111) // stale fork — arrives second
 	block1002Hash := testBlockHashFor(1002)
 	block1003Hash := testBlockHashFor(1003)
 
@@ -1326,11 +1335,4 @@ func TestWaitUntilStartedCancelledCtx(t *testing.T) {
 
 	done()
 	bl.waitUntilStarted(context.Background())
-}
-
-func TestMonitoredHeadLengthU64(t *testing.T) {
-	bl := &blockListener{BlockListenerConfig: BlockListenerConfig{
-		MonitoredHeadLength: -1,
-	}}
-	require.Equal(t, uint64(0), bl.monitoredHeadLengthU64())
 }

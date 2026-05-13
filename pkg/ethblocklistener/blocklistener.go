@@ -125,6 +125,7 @@ type blockListener struct {
 	BlockListenerConfig
 
 	//  canonical chain
+	monitoredHeadLength  uint64
 	canonicalChainLock   sync.RWMutex // covers highestBlock and canonicalChain
 	canonicalChain       *list.List
 	highestBlockSet      bool
@@ -168,6 +169,10 @@ func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf
 		blockFetchConcurrencyThrottle: make(chan *blockReceiptRequest, conf.MaxAsyncBlockFetchConcurrency),
 		BlockListenerConfig:           *conf,
 	}
+	if conf.MonitoredHeadLength <= 0 {
+		return nil, i18n.WrapError(ctx, err, msgs.MsgMonitoredHeadLengthInvalid, conf.MonitoredHeadLength)
+	}
+	bl.monitoredHeadLength = uint64(conf.MonitoredHeadLength)
 	bl.blockCache, err = lru.New(conf.BlockCacheSize)
 	if err != nil {
 		return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "block")
@@ -187,13 +192,6 @@ func (bl *blockListener) GetMonitoredHeadLength() int {
 	return bl.BlockListenerConfig.MonitoredHeadLength
 }
 
-func (bl *blockListener) monitoredHeadLengthU64() uint64 {
-	if bl.BlockListenerConfig.MonitoredHeadLength > 0 {
-		return uint64(bl.BlockListenerConfig.MonitoredHeadLength) //#nosec G115 -- guarded by > 0 check above
-	}
-	return 0
-}
-
 // seedMonitoredHead fetches the single anchor block at highestBlock-MonitoredHeadLength+1.
 // The returned block is used by the listen loop to seed the canonical chain on the first
 // iteration via reconcileCanonicalChain, so that the chain is populated before the first
@@ -202,8 +200,8 @@ func (bl *blockListener) seedMonitoredHead() *ethrpc.BlockInfoJSONRPC {
 	bl.canonicalChainLock.RLock()
 	highestBlockSet := bl.highestBlockSet
 	startBlock := uint64(0)
-	if bl.highestBlock >= bl.monitoredHeadLengthU64() {
-		startBlock = bl.highestBlock - bl.monitoredHeadLengthU64() + 1
+	if bl.highestBlock >= bl.monitoredHeadLength {
+		startBlock = bl.highestBlock - bl.monitoredHeadLength + 1
 	}
 	bl.canonicalChainLock.RUnlock()
 
