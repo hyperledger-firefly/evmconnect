@@ -83,6 +83,13 @@ func mockStreamLoopEmpty(mRPC *rpcbackendmocks.Backend) {
 		hbh := args[1].(*ethtypes.HexInteger)
 		*hbh = *ethtypes.NewHexInteger64(testHighBlock)
 	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", mock.Anything, false).Return(nil).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = testBlockFilterID1
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getFilterChanges", testBlockFilterID1).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]ethtypes.HexBytes0xPrefix) = nil
+	}).Maybe()
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newFilter", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*string) = testLogsFilterID1
 	}).Maybe()
