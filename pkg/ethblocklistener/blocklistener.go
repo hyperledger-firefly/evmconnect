@@ -125,6 +125,7 @@ type blockListener struct {
 	BlockListenerConfig
 
 	//  canonical chain
+	monitoredHeadLength  uint64
 	canonicalChainLock   sync.RWMutex // covers highestBlock and canonicalChain
 	canonicalChain       *list.List
 	highestBlockSet      bool
@@ -168,6 +169,10 @@ func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf
 		blockFetchConcurrencyThrottle: make(chan *blockReceiptRequest, conf.MaxAsyncBlockFetchConcurrency),
 		BlockListenerConfig:           *conf,
 	}
+	if conf.MonitoredHeadLength <= 0 {
+		return nil, i18n.WrapError(ctx, err, msgs.MsgMonitoredHeadLengthInvalid, conf.MonitoredHeadLength)
+	}
+	bl.monitoredHeadLength = uint64(conf.MonitoredHeadLength)
 	bl.blockCache, err = lru.New(conf.BlockCacheSize)
 	if err != nil {
 		return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "block")
@@ -185,6 +190,35 @@ func (bl *blockListener) UTSetBackend(backend rpcbackend.RPC) {
 
 func (bl *blockListener) GetMonitoredHeadLength() int {
 	return bl.BlockListenerConfig.MonitoredHeadLength
+}
+
+// seedMonitoredHead fetches the single anchor block at highestBlock-MonitoredHeadLength+1.
+// The returned block is used by the listen loop to seed the canonical chain on the first
+// iteration via reconcileCanonicalChain, so that the chain is populated before the first
+// filter poll and confirmations can be delivered as soon as they arrive.
+func (bl *blockListener) seedMonitoredHead() *ethrpc.BlockInfoJSONRPC {
+	bl.canonicalChainLock.RLock()
+	highestBlockSet := bl.highestBlockSet
+	startBlock := uint64(0)
+	if bl.highestBlock >= bl.monitoredHeadLength {
+		startBlock = bl.highestBlock - bl.monitoredHeadLength + 1
+	}
+	bl.canonicalChainLock.RUnlock()
+
+	if !highestBlockSet {
+		return nil
+	}
+
+	var bi *ethrpc.BlockInfoJSONRPC
+	if err := bl.retry.Do(bl.ctx, "seed monitored head", func(_ int) (retry bool, err error) {
+		bi, err = bl.GetBlockInfoByNumber(bl.ctx, startBlock, false, "", "")
+		return err != nil, err
+	}); err != nil || bi == nil {
+		log.L(bl.ctx).Warnf("Failed to seed monitored head at block %d: %v", startBlock, err)
+		return nil
+	}
+	log.L(bl.ctx).Infof("Seeded monitored head at block %d", startBlock)
+	return bi
 }
 
 // setting block filter status updates that new block filter has been created
@@ -289,6 +323,14 @@ func (bl *blockListener) listenLoop() {
 		log.L(bl.ctx).Warnf("Block listener exiting before establishing initial block height: %s", err)
 	}
 
+	// Seed the canonical chain before starting the filter loop (not applicable in light mode).
+	// The seed block is reconciled on the first loop iteration instead of polling the filter,
+	// so the in-memory chain is pre-populated and confirmations can be delivered immediately.
+	var seedBi *ethrpc.BlockInfoJSONRPC
+	if bl.ChainTrackingMode != ffcapi.ChainTrackingModeLight {
+		seedBi = bl.seedMonitoredHead()
+	}
+
 	var filter string
 	failCount := 0
 	gapPotential := true
@@ -321,19 +363,27 @@ func (bl *blockListener) listenLoop() {
 			bl.markStarted()
 		}
 
+		// On the first iteration use the seed block (leaves blockHashes nil).
+		// On subsequent iterations poll the filter for new block hashes.
 		var blockHashes []ethtypes.HexBytes0xPrefix
-		rpcErr := bl.backend.CallRPC(bl.ctx, &blockHashes, "eth_getFilterChanges", filter)
-		if rpcErr != nil {
-			if etherrors.MapError(etherrors.FilterRPCMethods, rpcErr.Error()) == ffcapi.ErrorReasonNotFound {
-				log.L(bl.ctx).Warnf("Block filter '%v' no longer valid. Recreating filter: %s", filter, rpcErr.Message)
-				filter = ""
-				gapPotential = true
+		var notifyPos *list.Element
+		if seedBi != nil {
+			notifyPos = bl.reconcileCanonicalChain(seedBi)
+			seedBi = nil
+		} else {
+			rpcErr := bl.backend.CallRPC(bl.ctx, &blockHashes, "eth_getFilterChanges", filter)
+			if rpcErr != nil {
+				if etherrors.MapError(etherrors.FilterRPCMethods, rpcErr.Error()) == ffcapi.ErrorReasonNotFound {
+					log.L(bl.ctx).Warnf("Block filter '%v' no longer valid. Recreating filter: %s", filter, rpcErr.Message)
+					filter = ""
+					gapPotential = true
+				}
+				log.L(bl.ctx).Errorf("Failed to query block filter changes: %s", rpcErr.Message)
+				failCount++
+				continue
 			}
-			log.L(bl.ctx).Errorf("Failed to query block filter changes: %s", rpcErr.Message)
-			failCount++
-			continue
+			log.L(bl.ctx).Debugf("Block filter received new block hashes: %+v", blockHashes)
 		}
-		log.L(bl.ctx).Debugf("Block filter received new block hashes: %+v", blockHashes)
 
 		if bl.ChainTrackingMode == ffcapi.ChainTrackingModeLight {
 			head, err := bl.refreshHighestBlockFromRPC()
@@ -360,7 +410,6 @@ func (bl *blockListener) listenLoop() {
 		}
 
 		update := &ffcapi.BlockHashEvent{GapPotential: gapPotential, Created: fftypes.Now()}
-		var notifyPos *list.Element
 		for _, h := range blockHashes {
 			if len(h) != 32 {
 				if !bl.HederaCompatibilityMode {
