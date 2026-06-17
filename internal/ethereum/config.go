@@ -27,6 +27,7 @@ const (
 	ConfigDataFormat            = "dataFormat"
 	BlockPollingInterval        = "blockPollingInterval"
 	BlockCacheSize              = "blockCacheSize"
+	ReceiptCacheSize            = "receiptCacheSize"
 	ChainTrackingMode           = "chainTrackingMode"
 	EventsCatchupPageSize       = "events.catchupPageSize"
 	EventsCatchupThreshold      = "events.catchupThreshold"
@@ -71,6 +72,7 @@ func InitConfig(conf config.Section) {
 	wsclient.InitConfig(conf)
 	conf.AddKnownKey(WebSocketsEnabled, false)
 	conf.AddKnownKey(BlockCacheSize, 250)
+	conf.AddKnownKey(ReceiptCacheSize, 5000)
 	conf.AddKnownKey(BlockPollingInterval, "1s")
 	conf.AddKnownKey(ChainTrackingMode, ffcapi.ChainTrackingModeFull)
 	conf.AddKnownKey(ConfigDataFormat, "map")
@@ -92,7 +94,7 @@ func InitConfig(conf config.Section) {
 	conf.AddKnownKey(HederaCompatibilityMode, false)
 	conf.AddKnownKey(TraceTXForRevertReason, false)
 	conf.AddKnownKey(MaxAsyncBlockFetchConcurrency, 25)
-	conf.AddKnownKey(UseGetBlockReceipts, false /* likely consumers of this package will want to set this default to true */)
+	conf.AddKnownKey(UseGetBlockReceipts, true /* likely consumers of this package will want to set this default to true */)
 
 	// FireFly Common default for retry enabled is false,
 	// but we want to enable it by default

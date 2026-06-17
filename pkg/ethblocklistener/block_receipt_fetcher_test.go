@@ -202,3 +202,115 @@ func TestFetchBlockReceiptsAsyncNonOptimizedNotFound(t *testing.T) {
 	})
 	<-fetched
 }
+
+func TestGetTransactionReceiptUsesCache(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+	defer done()
+
+	txHash := "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6"
+	cachedReceipt := &ethrpc.TxReceiptJSONRPC{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash),
+		BlockNumber:     ethtypes.HexUint64(1977),
+		BlockHash:       generateTestHash(1977),
+	}
+
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{cachedReceipt}, bl.getReceiptCacheGeneration())
+
+	receipt, err := bl.GetTransactionReceipt(context.Background(), txHash)
+	assert.NoError(t, err)
+	assert.Equal(t, cachedReceipt, receipt)
+	mRPC.AssertNotCalled(t, "CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", mock.Anything)
+}
+
+func TestResetReceiptCacheClearsCachedReceipts(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
+	defer done()
+
+	txHash := "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6"
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash)},
+	}, bl.getReceiptCacheGeneration())
+
+	_, ok := bl.getCachedTransactionReceipt(txHash)
+	assert.True(t, ok)
+
+	bl.resetReceiptCache()
+
+	_, ok = bl.getCachedTransactionReceipt(txHash)
+	assert.False(t, ok)
+}
+
+func TestStoreReceiptsInCacheIgnoresStaleGeneration(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
+	defer done()
+
+	gen := bl.getReceiptCacheGeneration()
+	bl.resetReceiptCache()
+
+	txHash := "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6"
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash)},
+	}, gen)
+
+	_, ok := bl.getCachedTransactionReceipt(txHash)
+	assert.False(t, ok)
+}
+
+func TestReconcileConfirmationsForTransactionUsesCachedReceipt(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+	defer done()
+	bl.canonicalChain = createTestChain(1976, 1978)
+
+	txHash := "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6"
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{
+			TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash),
+			BlockNumber:     ethtypes.HexUint64(1977),
+			BlockHash:       generateTestHash(1977),
+		},
+	}, bl.getReceiptCacheGeneration())
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", "0x7b9", false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number:     1977,
+			Hash:       generateTestHash(1977),
+			ParentHash: generateTestHash(1976),
+		}}
+	})
+
+	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), txHash, []*ethrpc.MinimalBlockInfo{}, 5)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.NotNil(t, receipt)
+	assert.Equal(t, ethtypes.HexUint64(1977), receipt.BlockNumber)
+	mRPC.AssertNotCalled(t, "CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", mock.Anything)
+}
+
+func TestReceiptCacheEvictsWhenFull(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc) {
+		conf.ReceiptCacheSize = 2
+	})
+	defer done()
+
+	gen := bl.getReceiptCacheGeneration()
+	txHash1 := "0x1111111111111111111111111111111111111111111111111111111111111111"
+	txHash2 := "0x2222222222222222222222222222222222222222222222222222222222222222"
+	txHash3 := "0x3333333333333333333333333333333333333333333333333333333333333333"
+
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash1)},
+	}, gen)
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash2)},
+	}, gen)
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash3)},
+	}, gen)
+
+	_, ok := bl.getCachedTransactionReceipt(txHash1)
+	assert.False(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(txHash2)
+	assert.True(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(txHash3)
+	assert.True(t, ok)
+}

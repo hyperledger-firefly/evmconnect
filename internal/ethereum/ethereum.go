@@ -174,6 +174,7 @@ func NewEthereumConnector(ctx context.Context, conf config.Section) (cc Connecto
 		MonitoredHeadLength:           int(c.checkpointBlockGap),
 		HederaCompatibilityMode:       conf.GetBool(HederaCompatibilityMode),
 		BlockCacheSize:                conf.GetInt(BlockCacheSize),
+		ReceiptCacheSize:              conf.GetInt(ReceiptCacheSize),
 		MaxAsyncBlockFetchConcurrency: conf.GetInt(MaxAsyncBlockFetchConcurrency),
 		UseGetBlockReceipts:           conf.GetBool(UseGetBlockReceipts),
 		ChainTrackingMode:             c.chainTrackingMode,

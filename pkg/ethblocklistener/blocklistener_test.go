@@ -55,6 +55,7 @@ func newTestBlockListener(t *testing.T, confSetup ...func(conf *BlockListenerCon
 		MonitoredHeadLength:     50,
 		HederaCompatibilityMode: false,
 		BlockCacheSize:          250,
+		ReceiptCacheSize:        5000,
 	}
 	for _, fn := range confSetup {
 		fn(conf, mRPC, cancelCtx)
@@ -229,6 +230,12 @@ func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
 	_, err := NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
 		BlockCacheSize:      -1,
 		MonitoredHeadLength: 1,
+	}, &ffresty.Config{}, &wsclient.WSConfig{})
+	require.Regexp(t, "FF23040", err)
+
+	_, err = NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
+		BlockCacheSize:   250,
+		ReceiptCacheSize: -1,
 	}, &ffresty.Config{}, &wsclient.WSConfig{})
 	require.Regexp(t, "FF23040", err)
 }
