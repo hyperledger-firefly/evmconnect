@@ -239,18 +239,29 @@ func TestJSONFormatOptionErrors(t *testing.T) {
 
 	_, err = JSONFormatOptions("color=blue").GetABISerializer(ctx)
 	assert.Regexp(t, "FF23066", err)
+	assert.Contains(t, err.Error(), "color=blue")
+	assert.Contains(t, err.Error(), "Supported options and values:")
+	assert.Contains(t, err.Error(), "mode (object, array, self-describing)")
 
 	_, err = JSONFormatOptions("mode=blue").GetABISerializer(ctx)
-	assert.Regexp(t, "FF23066", err)
+	assert.Regexp(t, "FF23073", err)
+	assert.Contains(t, err.Error(), "mode")
+	assert.Contains(t, err.Error(), "Supported values: object, array, self-describing")
 
 	_, err = JSONFormatOptions("number=blue").GetABISerializer(ctx)
-	assert.Regexp(t, "FF23066", err)
+	assert.Regexp(t, "FF23073", err)
+	assert.Contains(t, err.Error(), "number")
+	assert.Contains(t, err.Error(), "Supported values: string, hex-0x, hex, json-number")
 
 	_, err = JSONFormatOptions("bytes=blue").GetABISerializer(ctx)
-	assert.Regexp(t, "FF23066", err)
+	assert.Regexp(t, "FF23073", err)
+	assert.Contains(t, err.Error(), "bytes")
+	assert.Contains(t, err.Error(), "Supported values: hex-0x, hex, hex-plain, base64")
 
 	_, err = JSONFormatOptions("address=blue").GetABISerializer(ctx)
-	assert.Regexp(t, "FF23066", err)
+	assert.Regexp(t, "FF23073", err)
+	assert.Contains(t, err.Error(), "address")
+	assert.Contains(t, err.Error(), "Supported values: hex-0x, hex, hex-plain, checksum")
 
 	s := JSONFormatOptions("this;is;ignored").GetABISerializerIgnoreErrors(ctx)
 	assert.NotNil(t, s)

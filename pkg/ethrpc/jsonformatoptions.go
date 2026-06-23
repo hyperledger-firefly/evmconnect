@@ -19,6 +19,7 @@ package ethrpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/url"
 	"strings"
@@ -52,6 +53,32 @@ const optBase64 = "base64"
 const optChecksum = "checksum"
 const optSelfDescribing = "self-describing"
 const optPretty = "pretty"
+
+var jsonFormatOptionSupportedValues = map[string][]string{
+	"mode":    {optObject, optArray, optSelfDescribing},
+	"number":  {optString, optHex0x, optHex, optJSONNumber},
+	"bytes":   {optHex0x, optHex, optHexPlain, optBase64},
+	"address": {optHex0x, optHex, optHexPlain, optChecksum},
+	optPretty: {"true", "false"},
+}
+
+func unknownJSONFormatOptionNameError(ctx context.Context, option, value string) error {
+
+	var jsonFormatOptionNames []string
+	for name := range jsonFormatOptionSupportedValues {
+		jsonFormatOptionNames = append(jsonFormatOptionNames, name)
+	}
+	parts := make([]string, len(jsonFormatOptionNames))
+	for i, name := range jsonFormatOptionNames {
+		parts[i] = fmt.Sprintf("%s (%s)", name, strings.Join(jsonFormatOptionSupportedValues[name], ", "))
+	}
+	return i18n.NewError(ctx, msgs.MsgUnknownJSONFormatOption, option, value, strings.Join(parts, "; "))
+}
+
+func unknownJSONFormatOptionValueError(ctx context.Context, option, value string) error {
+	values := jsonFormatOptionSupportedValues[strings.ToLower(option)]
+	return i18n.NewError(ctx, msgs.MsgUnknownJSONFormatOptionValue, value, option, strings.Join(values, ", "))
+}
 
 func (jfo JSONFormatOptions) GetABISerializer(ctx context.Context) (serializer *abi.Serializer, err error) {
 	return jfo.getABISerializer(ctx, false)
@@ -94,7 +121,7 @@ func (jfo JSONFormatOptions) GetSerializerSet(ctx context.Context, skipErrors bo
 					ss.Mode = abi.FormatAsSelfDescribingArrays
 				default:
 					if !skipErrors {
-						return nil, i18n.WrapError(ctx, err, msgs.MsgUnknownJSONFormatOptions, option, v)
+						return nil, unknownJSONFormatOptionValueError(ctx, option, v)
 					}
 				}
 			case "number":
@@ -107,7 +134,7 @@ func (jfo JSONFormatOptions) GetSerializerSet(ctx context.Context, skipErrors bo
 					ss.Integer = abi.JSONNumberIntSerializer
 				default:
 					if !skipErrors {
-						return nil, i18n.WrapError(ctx, err, msgs.MsgUnknownJSONFormatOptions, option, v)
+						return nil, unknownJSONFormatOptionValueError(ctx, option, v)
 					}
 				}
 			case "bytes":
@@ -119,7 +146,9 @@ func (jfo JSONFormatOptions) GetSerializerSet(ctx context.Context, skipErrors bo
 				case optBase64:
 					ss.Bytes = abi.Base64ByteSerializer
 				default:
-					return nil, i18n.WrapError(ctx, err, msgs.MsgUnknownJSONFormatOptions, option, v)
+					if !skipErrors {
+						return nil, unknownJSONFormatOptionValueError(ctx, option, v)
+					}
 				}
 			case "address":
 				switch strings.ToLower(v) {
@@ -130,13 +159,15 @@ func (jfo JSONFormatOptions) GetSerializerSet(ctx context.Context, skipErrors bo
 				case optChecksum:
 					ss.Address = abi.ChecksumAddrSerializer
 				default:
-					return nil, i18n.WrapError(ctx, err, msgs.MsgUnknownJSONFormatOptions, option, v)
+					if !skipErrors {
+						return nil, unknownJSONFormatOptionValueError(ctx, option, v)
+					}
 				}
 			case optPretty:
 				ss.Pretty = (v != "false")
 			default:
 				if !skipErrors {
-					return nil, i18n.WrapError(ctx, err, msgs.MsgUnknownJSONFormatOptions, option, v)
+					return nil, unknownJSONFormatOptionNameError(ctx, option, v)
 				}
 			}
 		}
