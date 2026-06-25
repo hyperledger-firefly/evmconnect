@@ -164,13 +164,14 @@ func (l *LogJSONRPC) MarshalFormat(jss *JSONSerializerSet, opts ...MarshalOption
 
 // BlockInfoJSONRPC are the info fields we parse from the JSON/RPC response, and cache
 type BlockInfoJSONRPC struct {
-	Number       ethtypes.HexUint64          `json:"number" ffstruct:"BlockInfoJSONRPC"`
-	Hash         ethtypes.HexBytes0xPrefix   `json:"hash" ffstruct:"BlockInfoJSONRPC"`
-	ParentHash   ethtypes.HexBytes0xPrefix   `json:"parentHash" ffstruct:"BlockInfoJSONRPC"`
-	Timestamp    ethtypes.HexUint64          `json:"timestamp" ffstruct:"BlockInfoJSONRPC"`
-	GasLimit     *ethtypes.HexInteger        `json:"gasLimit" ffstruct:"BlockInfoJSONRPC"`
-	LogsBloom    ethtypes.HexBytes0xPrefix   `json:"logsBloom" ffstruct:"BlockInfoJSONRPC"`
-	Transactions []ethtypes.HexBytes0xPrefix `json:"transactions" ffstruct:"BlockInfoJSONRPC"`
+	Number        ethtypes.HexUint64          `json:"number" ffstruct:"BlockInfoJSONRPC"`
+	Hash          ethtypes.HexBytes0xPrefix   `json:"hash" ffstruct:"BlockInfoJSONRPC"`
+	ParentHash    ethtypes.HexBytes0xPrefix   `json:"parentHash" ffstruct:"BlockInfoJSONRPC"`
+	Timestamp     ethtypes.HexUint64          `json:"timestamp" ffstruct:"BlockInfoJSONRPC"`
+	GasLimit      *ethtypes.HexInteger        `json:"gasLimit" ffstruct:"BlockInfoJSONRPC"`
+	BaseFeePerGas *ethtypes.HexInteger        `json:"baseFeePerGas,omitempty" ffstruct:"BlockInfoJSONRPC"`
+	LogsBloom     ethtypes.HexBytes0xPrefix   `json:"logsBloom" ffstruct:"BlockInfoJSONRPC"`
+	Transactions  []ethtypes.HexBytes0xPrefix `json:"transactions" ffstruct:"BlockInfoJSONRPC"`
 }
 
 func (bi *BlockInfoJSONRPC) MarshalFormat(jss *JSONSerializerSet, opts ...MarshalOption) (_ json.RawMessage, err error) {
@@ -196,6 +197,11 @@ func (bi *BlockInfoJSONRPC) Equal(bi2 *BlockInfoJSONRPC) bool {
 
 func (bi *BlockInfoJSONRPC) IsParentOf(other *BlockInfoJSONRPC) bool {
 	return bi.Hash.Equals(other.ParentHash) && (bi.Number.Uint64()+1) == other.Number.Uint64()
+}
+
+// SupportsEIP1559 returns true if the block includes baseFeePerGas (EIP-1559 / post-London).
+func (bi *BlockInfoJSONRPC) SupportsEIP1559() bool {
+	return bi != nil && bi.BaseFeePerGas != nil
 }
 
 type MinimalBlockInfo struct { // duplicate of apitypes.Confirmation due to circular dependency
@@ -274,11 +280,12 @@ func (b *BlockHeaderJSONRPC) getFormatMap() map[string]any {
 
 func (b *BlockHeaderJSONRPC) ToBlockInfo(includeLogsBloom bool) *BlockInfoJSONRPC {
 	bi := &BlockInfoJSONRPC{
-		Number:     b.Number,
-		Hash:       b.Hash,
-		ParentHash: b.ParentHash,
-		Timestamp:  b.Timestamp,
-		GasLimit:   b.GasLimit,
+		Number:        b.Number,
+		Hash:          b.Hash,
+		ParentHash:    b.ParentHash,
+		Timestamp:     b.Timestamp,
+		GasLimit:      b.GasLimit,
+		BaseFeePerGas: b.BaseFeePerGas,
 	}
 	if includeLogsBloom {
 		bi.LogsBloom = b.LogsBloom

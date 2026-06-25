@@ -41,6 +41,7 @@ func testEventStream(t *testing.T, listeners ...*ffcapi.EventListenerAddRequest)
 func testEventStreamExistingConnector(t *testing.T, ctx context.Context, done func(), c *ethConnector, mRPC *rpcbackendmocks.Backend, listeners ...*ffcapi.EventListenerAddRequest) (*eventStream, chan *ffcapi.ListenerEvent, *rpcbackendmocks.Backend, func()) {
 	events := make(chan *ffcapi.ListenerEvent)
 	esID := fftypes.NewUUID()
+	c.chainID = "12345" // set chainID before streamLoop starts, so enrich does not call net_version
 	_, _, err := c.EventStreamStart(ctx, &ffcapi.EventStreamStartRequest{
 		ID:               esID,
 		StreamContext:    ctx,
@@ -52,7 +53,6 @@ func testEventStreamExistingConnector(t *testing.T, ctx context.Context, done fu
 	es := c.eventStreams[*esID]
 	es.c.eventFilterPollingInterval = 1 * time.Millisecond
 	es.c.retry.MaximumDelay = 1 * time.Microsecond
-	c.chainID = "12345"
 	assert.NotNil(t, es)
 
 	es.preStartProcessing()
