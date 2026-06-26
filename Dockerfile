@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine3.20 AS builder
+FROM golang:1.26.4-alpine3.24 AS builder
 RUN apk add --no-cache make git
 ARG BUILD_VERSION
 ENV BUILD_VERSION=${BUILD_VERSION}
@@ -11,7 +11,7 @@ USER 1001
 RUN make
 
 # Copy the migrations from FFTM down into our local migrations directory
-RUN DB_MIGRATIONS_DIR=$(go list -f '{{.Dir}}' github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi | sed 's|pkg/ffcapi|db|') \
+RUN DB_MIGRATIONS_DIR=$(go list -f '{{.Dir}}' github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi | sed 's|pkg/ffcapi|db|') \
     && cp -R "$DB_MIGRATIONS_DIR" db
 
 FROM alpine:3.21.3
