@@ -1,13 +1,13 @@
-module github.com/hyperledger/firefly-evmconnect
+module github.com/hyperledger-firefly/evmconnect
 
-go 1.23.0
+go 1.26.4
 
 require (
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/golang-lru v1.0.2
-	github.com/hyperledger/firefly-common v1.5.9
-	github.com/hyperledger/firefly-signer v1.1.23-0.20260422080826-42345c6c6b85
-	github.com/hyperledger/firefly-transaction-manager v1.4.5
+	github.com/hyperledger-firefly/common v1.6.1
+	github.com/hyperledger-firefly/signer v1.2.0
+	github.com/hyperledger-firefly/transaction-manager v1.5.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.8.0
 	github.com/stretchr/testify v1.9.0

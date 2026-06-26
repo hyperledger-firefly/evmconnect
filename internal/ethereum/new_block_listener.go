@@ -19,8 +19,8 @@ package ethereum
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-evmconnect/pkg/ethblocklistener"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 func (c *ethConnector) GetChainTrackingMode(_ context.Context) ffcapi.ChainTrackingMode {

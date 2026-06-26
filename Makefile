@@ -23,8 +23,8 @@ ${MOCKERY}:
 ${LINT}:
 		$(VGO) install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 mockpaths:
-		$(eval FFTM_PATH := $(shell $(VGO) list -f '{{.Dir}}' github.com/hyperledger/firefly-transaction-manager/pkg/fftm))
-		$(eval FF_SIGNER_PATH := $(shell $(VGO) list -f '{{.Dir}}' github.com/hyperledger/firefly-signer/pkg/rpcbackend))
+		$(eval FFTM_PATH := $(shell $(VGO) list -f '{{.Dir}}' github.com/hyperledger-firefly/transaction-manager/pkg/fftm))
+		$(eval FF_SIGNER_PATH := $(shell $(VGO) list -f '{{.Dir}}' github.com/hyperledger-firefly/signer/pkg/rpcbackend))
 
 define makemock
 mocks: mocks-$(strip $(1))-$(strip $(2))
@@ -50,4 +50,4 @@ deps:
 reference:
 		$(VGO) test ./cmd -timeout=10s -tags docs
 docker:
-		docker build --build-arg BUILD_VERSION=${BUILD_VERSION} ${DOCKER_ARGS} -t hyperledger/firefly-evmconnect .
+		docker build --build-arg BUILD_VERSION=${BUILD_VERSION} ${DOCKER_ARGS} -t hyperledger-firefly/evmconnect .

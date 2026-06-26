@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/firefly-evmconnect/mocks/fftmmocks"
+	"github.com/hyperledger-firefly/evmconnect/mocks/fftmmocks"
 	"github.com/stretchr/testify/assert"
 )
 
