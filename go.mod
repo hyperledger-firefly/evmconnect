@@ -1,6 +1,6 @@
 module github.com/hyperledger-firefly/evmconnect
 
-go 1.26.4
+go 1.26.0
 
 require (
 	github.com/gorilla/mux v1.8.1
