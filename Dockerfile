@@ -1,4 +1,4 @@
-FROM golang:1.26.0-alpine3.24 AS builder
+FROM golang:1.26.0-alpine3.23 AS builder
 RUN apk add --no-cache make git
 ARG BUILD_VERSION
 ENV BUILD_VERSION=${BUILD_VERSION}
