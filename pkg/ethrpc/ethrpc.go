@@ -20,8 +20,8 @@ import (
 	"encoding/json"
 	"math/big"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
 )
 
 // TxReceiptJSONRPC is the receipt obtained over JSON/RPC from the ethereum client, with gas used, logs and contract address

@@ -19,9 +19,9 @@ package ethereum
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 func (c *ethConnector) AddressBalance(ctx context.Context, req *ffcapi.AddressBalanceRequest) (*ffcapi.AddressBalanceResponse, ffcapi.ErrorReason, error) {

@@ -20,11 +20,11 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-evmconnect/internal/msgs"
-	"github.com/hyperledger/firefly-evmconnect/pkg/ethblocklistener"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 func (c *ethConnector) EventStreamStart(ctx context.Context, req *ffcapi.EventStreamStartRequest) (*ffcapi.EventStreamStartResponse, ffcapi.ErrorReason, error) {

@@ -5,7 +5,8 @@ package rpcbackendmocks
 import (
 	context "context"
 
-	rpcbackend "github.com/hyperledger/firefly-signer/pkg/rpcbackend"
+	fftypes "github.com/hyperledger-firefly/common/pkg/fftypes"
+	rpcbackend "github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -37,24 +38,51 @@ func (_m *Backend) CallRPC(ctx context.Context, result interface{}, method strin
 	return r0
 }
 
+// CallRPCBatch provides a mock function with given fields: ctx, ops
+func (_m *Backend) CallRPCBatch(ctx context.Context, ops ...*rpcbackend.RPCBatchOp) []*rpcbackend.RPCError {
+	_va := make([]interface{}, len(ops))
+	for _i := range ops {
+		_va[_i] = ops[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CallRPCBatch")
+	}
+
+	var r0 []*rpcbackend.RPCError
+	if rf, ok := ret.Get(0).(func(context.Context, ...*rpcbackend.RPCBatchOp) []*rpcbackend.RPCError); ok {
+		r0 = rf(ctx, ops...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*rpcbackend.RPCError)
+		}
+	}
+
+	return r0
+}
+
 // SyncRequest provides a mock function with given fields: ctx, rpcReq
-func (_m *Backend) SyncRequest(ctx context.Context, rpcReq *rpcbackend.RPCRequest) (*rpcbackend.RPCResponse, error) {
+func (_m *Backend) SyncRequest(ctx context.Context, rpcReq *rpcbackend.RPCRequest) (*rpcbackend.RPCResponseTyped[*fftypes.JSONAny], error) {
 	ret := _m.Called(ctx, rpcReq)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SyncRequest")
 	}
 
-	var r0 *rpcbackend.RPCResponse
+	var r0 *rpcbackend.RPCResponseTyped[*fftypes.JSONAny]
 	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, *rpcbackend.RPCRequest) (*rpcbackend.RPCResponse, error)); ok {
+	if rf, ok := ret.Get(0).(func(context.Context, *rpcbackend.RPCRequest) (*rpcbackend.RPCResponseTyped[*fftypes.JSONAny], error)); ok {
 		return rf(ctx, rpcReq)
 	}
-	if rf, ok := ret.Get(0).(func(context.Context, *rpcbackend.RPCRequest) *rpcbackend.RPCResponse); ok {
+	if rf, ok := ret.Get(0).(func(context.Context, *rpcbackend.RPCRequest) *rpcbackend.RPCResponseTyped[*fftypes.JSONAny]); ok {
 		r0 = rf(ctx, rpcReq)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*rpcbackend.RPCResponse)
+			r0 = ret.Get(0).(*rpcbackend.RPCResponseTyped[*fftypes.JSONAny])
 		}
 	}
 

@@ -23,7 +23,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/hyperledger/firefly-signer/pkg/abi"
+	"github.com/hyperledger-firefly/signer/pkg/abi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
