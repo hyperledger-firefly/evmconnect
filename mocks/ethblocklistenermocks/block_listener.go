@@ -5,11 +5,11 @@ package ethblocklistenermocks
 import (
 	context "context"
 
-	fftypes "github.com/hyperledger/firefly-common/pkg/fftypes"
-	ethblocklistener "github.com/hyperledger/firefly-evmconnect/pkg/ethblocklistener"
-	ethrpc "github.com/hyperledger/firefly-evmconnect/pkg/ethrpc"
-	ethtypes "github.com/hyperledger/firefly-signer/pkg/ethtypes"
-	rpcbackend "github.com/hyperledger/firefly-signer/pkg/rpcbackend"
+	fftypes "github.com/hyperledger-firefly/common/pkg/fftypes"
+	ethblocklistener "github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
+	ethrpc "github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
+	ethtypes "github.com/hyperledger-firefly/signer/pkg/ethtypes"
+	rpcbackend "github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	mock "github.com/stretchr/testify/mock"
 )
 

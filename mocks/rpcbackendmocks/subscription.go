@@ -5,8 +5,8 @@ package rpcbackendmocks
 import (
 	context "context"
 
-	fftypes "github.com/hyperledger/firefly-common/pkg/fftypes"
-	rpcbackend "github.com/hyperledger/firefly-signer/pkg/rpcbackend"
+	fftypes "github.com/hyperledger-firefly/common/pkg/fftypes"
+	rpcbackend "github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	mock "github.com/stretchr/testify/mock"
 )
 

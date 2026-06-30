@@ -19,9 +19,9 @@ package ethereum
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-evmconnect/pkg/etherrors"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/evmconnect/pkg/etherrors"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 func (c *ethConnector) IsLive(_ context.Context) (*ffcapi.LiveResponse, ffcapi.ErrorReason, error) {

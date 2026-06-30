@@ -22,8 +22,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/hyperledger/firefly-common/pkg/ffapi"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/common/pkg/ffapi"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
 	"github.com/stretchr/testify/require"
 )
 

@@ -23,19 +23,19 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/hyperledger/firefly-common/pkg/ffresty"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-common/pkg/retry"
-	"github.com/hyperledger/firefly-common/pkg/wsclient"
-	"github.com/hyperledger/firefly-evmconnect/internal/msgs"
-	"github.com/hyperledger/firefly-evmconnect/internal/retryutil"
-	"github.com/hyperledger/firefly-evmconnect/pkg/etherrors"
-	"github.com/hyperledger/firefly-evmconnect/pkg/ethrpc"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
-	"github.com/hyperledger/firefly-signer/pkg/rpcbackend"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/ffresty"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/retry"
+	"github.com/hyperledger-firefly/common/pkg/wsclient"
+	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
+	"github.com/hyperledger-firefly/evmconnect/internal/retryutil"
+	"github.com/hyperledger-firefly/evmconnect/pkg/etherrors"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // a linked list of accumulated confirmations for a transaction
@@ -154,7 +154,7 @@ func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf
 		conf.ChainTrackingMode = ffcapi.ChainTrackingModeFull
 	}
 	bl := &blockListener{
-		ctx:                           log.WithLogField(ctx, "role", "blocklistener"),
+		ctx:                           log.WithLogFields(ctx, "role", "blocklistener"),
 		retry:                         &retryutil.RetryWrapper{Retry: retry},
 		backend:                       httpBackend, // use the HTTP backend - might get overwritten by a connected websocket later
 		wsBackend:                     wsBackend,

@@ -5,13 +5,13 @@ package fftmmocks
 import (
 	context "context"
 
-	apitypes "github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	eventapi "github.com/hyperledger/firefly-transaction-manager/pkg/eventapi"
-	ffcapi "github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	apitypes "github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	eventapi "github.com/hyperledger-firefly/transaction-manager/pkg/eventapi"
+	ffcapi "github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 
 	mux "github.com/gorilla/mux"
-	metric "github.com/hyperledger/firefly-common/pkg/metric"
-	txhandler "github.com/hyperledger/firefly-transaction-manager/pkg/txhandler"
+	metric "github.com/hyperledger-firefly/common/pkg/metric"
+	txhandler "github.com/hyperledger-firefly/transaction-manager/pkg/txhandler"
 	mock "github.com/stretchr/testify/mock"
 )
 

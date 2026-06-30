@@ -22,13 +22,13 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-evmconnect/internal/msgs"
-	"github.com/hyperledger/firefly-evmconnect/pkg/ethrpc"
-	"github.com/hyperledger/firefly-signer/pkg/abi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
+	"github.com/hyperledger-firefly/signer/pkg/abi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // listenerCheckpoint is our Ethereum specific custom options that can be specified when creating a listener
@@ -161,7 +161,7 @@ func (l *listener) listenerCatchupLoop() {
 	defer close(l.catchupLoopDone)
 
 	// Only filtering on a single listener
-	ctx := log.WithLogField(l.es.ctx, "listener", l.id.String())
+	ctx := log.WithLogFields(l.es.ctx, "listener", l.id.String())
 	al := l.es.buildAggregatedListener([]*listener{l})
 
 	failCount := 0
