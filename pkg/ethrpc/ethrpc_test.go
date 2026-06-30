@@ -22,8 +22,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/hyperledger/firefly-common/pkg/ffapi"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/common/pkg/ffapi"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
 	"github.com/stretchr/testify/require"
 )
 
@@ -229,6 +229,8 @@ func TestFormatBlockFullWithHashes(t *testing.T) {
 	require.NotNil(t, block.ToBlockInfo(true).ToMinimalBlockInfo())
 	require.True(t, block.ToBlockInfo(true).Equal(block.ToBlockInfo(true)))
 	require.True(t, block.ToBlockInfo(true).ToMinimalBlockInfo().Equal(block.ToBlockInfo(true).ToMinimalBlockInfo()))
+	require.True(t, block.ToBlockInfo(true).SupportsEIP1559())
+	require.Equal(t, block.BaseFeePerGas, block.ToBlockInfo(true).BaseFeePerGas)
 	require.Nil(t, (*EVMBlockWithTxHashesJSONRPC)(nil).ToBlockInfo(true))
 	require.False(t, block.ToBlockInfo(true).ToMinimalBlockInfo().IsParentOf(block.ToBlockInfo(true).ToMinimalBlockInfo()))
 }
@@ -257,6 +259,51 @@ func TestFormatBlockFullWithTxns(t *testing.T) {
 	require.NotNil(t, block.ToBlockInfo(true))
 	require.Nil(t, (*EVMBlockWithTransactionsJSONRPC)(nil).ToBlockInfo(true))
 
+}
+
+func TestBlockInfoSupportsEIP1559(t *testing.T) {
+	require.False(t, (*BlockInfoJSONRPC)(nil).SupportsEIP1559())
+	require.False(t, (&BlockInfoJSONRPC{}).SupportsEIP1559())
+	require.True(t, (&BlockInfoJSONRPC{BaseFeePerGas: ethtypes.NewHexInteger64(0)}).SupportsEIP1559())
+}
+
+func TestBlockHeaderToBlockInfo(t *testing.T) {
+	header := BlockHeaderJSONRPC{
+		Number:        100,
+		Hash:          ethtypes.MustNewHexBytes0xPrefix("0x0101010101010101010101010101010101010101010101010101010101010101"),
+		ParentHash:    ethtypes.MustNewHexBytes0xPrefix("0x0202020202020202020202020202020202020202020202020202020202020202"),
+		Timestamp:     12345,
+		GasLimit:      ethtypes.NewHexInteger64(30000000),
+		BaseFeePerGas: ethtypes.NewHexInteger64(7),
+		LogsBloom:     ethtypes.MustNewHexBytes0xPrefix("0x000011112222"),
+	}
+
+	withBloom := header.ToBlockInfo(true)
+	require.Equal(t, header.GasLimit, withBloom.GasLimit)
+	require.Equal(t, header.BaseFeePerGas, withBloom.BaseFeePerGas)
+	require.Equal(t, header.LogsBloom, withBloom.LogsBloom)
+	require.True(t, withBloom.SupportsEIP1559())
+
+	withoutBloom := header.ToBlockInfo(false)
+	require.Equal(t, header.BaseFeePerGas, withoutBloom.BaseFeePerGas)
+	require.Empty(t, withoutBloom.LogsBloom)
+
+	legacyHeader := BlockHeaderJSONRPC{
+		Number:   99,
+		GasLimit: ethtypes.NewHexInteger64(8000000),
+	}
+	legacyBlock := legacyHeader.ToBlockInfo(false)
+	require.Equal(t, legacyHeader.GasLimit, legacyBlock.GasLimit)
+	require.Nil(t, legacyBlock.BaseFeePerGas)
+	require.False(t, legacyBlock.SupportsEIP1559())
+
+	var fullBlock EVMBlockWithTransactionsJSONRPC
+	err := json.Unmarshal([]byte(sampleBlockHeadersOnly), &fullBlock)
+	require.NoError(t, err)
+	fullBlock.Transactions = []*TxInfoJSONRPC{}
+	blockInfo := fullBlock.ToBlockInfo(false)
+	require.Equal(t, fullBlock.GasLimit, blockInfo.GasLimit)
+	require.Equal(t, fullBlock.BaseFeePerGas, blockInfo.BaseFeePerGas)
 }
 
 func TestBlockInfoIsParent(t *testing.T) {

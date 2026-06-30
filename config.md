@@ -87,7 +87,7 @@
 |traceTXForRevertReason|Enable the use of transaction trace functions (e.g. debug_traceTransaction) to obtain transaction revert reasons. This can place a high load on the EVM client.|`boolean`|`false`
 |txCacheSize|Maximum of transactions to hold in the transaction info cache|`int`|`250`
 |url|URL of JSON/RPC endpoint for the Ethereum node/gateway|string|`<nil>`
-|useGetBlockReceipts|When true, the eth_getBlockReceipts call is available for this connector to use|`boolean`|`false`
+|useGetBlockReceipts|When true, the eth_getBlockReceipts call is available for this connector to use|`boolean`|`true`
 
 ## connector.auth
 
@@ -95,6 +95,13 @@
 |---|-----------|----|-------------|
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
+
+## connector.dns
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|servers|An optional list of DNS server addresses (host or host:port, port defaults to 53) to use instead of the system resolver. Setting this forces use of Go's built-in DNS resolver.|`[]string`|`<nil>`
+|timeout|The dial timeout when contacting a configured DNS server|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
 
 ## connector.events
 
@@ -106,6 +113,12 @@
 |catchupThreshold|How many blocks behind the chain head an event stream or listener must be on startup, to enter catchup mode|`int`|`500`
 |checkpointBlockGap|The number of blocks at the head of the chain that should be considered unstable (could be dropped from the canonical chain after a re-org). Unless events with a full set of confirmations are detected, the restart checkpoint will this many blocks behind the chain head.|`int`|`50`
 |filterPollingInterval|The interval between polling calls to a filter, when checking for newly arrived events|[`time.Duration`](https://pkg.go.dev/time#Duration)|`1s`
+
+## connector.net
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|cidrDenylist|A list of CIDR ranges to which outbound connections are blocked, as a core SSRF mitigation. Empty by default.|`[]string`|`<nil>`
 
 ## connector.proxy
 
@@ -441,6 +454,19 @@
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
 
+## policyengine.simple.gasOracle.dns
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|servers|An optional list of DNS server addresses (host or host:port, port defaults to 53) to use instead of the system resolver. Setting this forces use of Go's built-in DNS resolver.|`[]string`|`<nil>`
+|timeout|The dial timeout when contacting a configured DNS server|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
+
+## policyengine.simple.gasOracle.net
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|cidrDenylist|A list of CIDR ranges to which outbound connections are blocked, as a core SSRF mitigation. Empty by default.|`[]string`|`<nil>`
+
 ## policyengine.simple.gasOracle.proxy
 
 |Key|Description|Type|Default Value|
@@ -543,6 +569,19 @@
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
 
+## transactions.handler.simple.gasOracle.dns
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|servers|An optional list of DNS server addresses (host or host:port, port defaults to 53) to use instead of the system resolver. Setting this forces use of Go's built-in DNS resolver.|`[]string`|`<nil>`
+|timeout|The dial timeout when contacting a configured DNS server|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
+
+## transactions.handler.simple.gasOracle.net
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|cidrDenylist|A list of CIDR ranges to which outbound connections are blocked, as a core SSRF mitigation. Empty by default.|`[]string`|`<nil>`
+
 ## transactions.handler.simple.gasOracle.proxy
 
 |Key|Description|Type|Default Value|
@@ -611,6 +650,19 @@
 |---|-----------|----|-------------|
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
+
+## webhooks.dns
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|servers|An optional list of DNS server addresses (host or host:port, port defaults to 53) to use instead of the system resolver. Setting this forces use of Go's built-in DNS resolver.|`[]string`|`<nil>`
+|timeout|The dial timeout when contacting a configured DNS server|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
+
+## webhooks.net
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|cidrDenylist|A list of CIDR ranges to which outbound connections are blocked, as a core SSRF mitigation. Empty by default.|`[]string`|`<nil>`
 
 ## webhooks.proxy
 

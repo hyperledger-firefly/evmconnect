@@ -23,19 +23,19 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/hyperledger/firefly-common/pkg/ffresty"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-common/pkg/retry"
-	"github.com/hyperledger/firefly-common/pkg/wsclient"
-	"github.com/hyperledger/firefly-evmconnect/internal/msgs"
-	"github.com/hyperledger/firefly-evmconnect/internal/retryutil"
-	"github.com/hyperledger/firefly-evmconnect/pkg/etherrors"
-	"github.com/hyperledger/firefly-evmconnect/pkg/ethrpc"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
-	"github.com/hyperledger/firefly-signer/pkg/rpcbackend"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/ffresty"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/retry"
+	"github.com/hyperledger-firefly/common/pkg/wsclient"
+	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
+	"github.com/hyperledger-firefly/evmconnect/internal/retryutil"
+	"github.com/hyperledger-firefly/evmconnect/pkg/etherrors"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // a linked list of accumulated confirmations for a transaction
@@ -75,6 +75,7 @@ type BlockListener interface {
 	AddConsumer(ctx context.Context, c *BlockUpdateConsumer)
 	RemoveConsumer(ctx context.Context, id *fftypes.UUID)
 	GetHighestBlock(ctx context.Context) (uint64, bool)
+	GetHighestBlockInfo(ctx context.Context) (*ethrpc.BlockInfoJSONRPC, bool)
 	GetBlockGasLimit() *ethtypes.HexInteger // nil if unknown
 	GetBlockInfoByNumber(ctx context.Context, blockNumber uint64, allowCache bool, expectedParentHashStr string, expectedBlockHashStr string) (*ethrpc.BlockInfoJSONRPC, error)
 	GetBlockInfoByHash(ctx context.Context, hash0xString string) (*ethrpc.BlockInfoJSONRPC, error)
@@ -127,12 +128,12 @@ type blockListener struct {
 	BlockListenerConfig
 
 	//  canonical chain
-	monitoredHeadLength  uint64
-	canonicalChainLock   sync.RWMutex // covers highestBlock and canonicalChain
-	canonicalChain       *list.List
-	highestBlockSet      bool
-	highestBlock         uint64
-	highestBlockGasLimit *ethtypes.HexInteger
+	monitoredHeadLength uint64
+	canonicalChainLock  sync.RWMutex // covers highestBlock and canonicalChain
+	canonicalChain      *list.List
+	highestBlockSet     bool
+	highestBlock        uint64
+	headBlockInfo       *ethrpc.BlockInfoJSONRPC // full info for the current head block, when seen
 
 	// tx receipts indexed during canonical chain build, keyed by transaction hash
 	txReceiptCacheLock       sync.RWMutex
@@ -159,7 +160,7 @@ func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf
 		conf.ChainTrackingMode = ffcapi.ChainTrackingModeFull
 	}
 	bl := &blockListener{
-		ctx:                           log.WithLogField(ctx, "role", "blocklistener"),
+		ctx:                           log.WithLogFields(ctx, "role", "blocklistener"),
 		retry:                         &retryutil.RetryWrapper{Retry: retry},
 		backend:                       httpBackend, // use the HTTP backend - might get overwritten by a connected websocket later
 		wsBackend:                     wsBackend,
@@ -485,7 +486,7 @@ func (bl *blockListener) reconcileCanonicalChain(bi *ethrpc.BlockInfoJSONRPC) *l
 	bl.canonicalChainLock.Lock()
 	defer bl.canonicalChainLock.Unlock()
 
-	bl.checkAndSetHighestBlock(bi.Number.Uint64(), bi.GasLimit)
+	bl.checkAndSetHighestBlock(bi)
 
 	// Find the position of this block in the block sequence
 	pos := bl.canonicalChain.Back()
@@ -624,7 +625,7 @@ func (bl *blockListener) rebuildCanonicalChain() *list.Element {
 			notifyPos = newElem
 		}
 
-		bl.checkAndSetHighestBlock(bi.Number.Uint64(), bi.GasLimit)
+		bl.checkAndSetHighestBlock(bi)
 		bl.fetchAndCacheBlockReceipts(bi)
 
 	}
@@ -714,21 +715,27 @@ func (bl *blockListener) RemoveConsumer(_ context.Context, id *fftypes.UUID) {
 	delete(bl.consumers, *id)
 }
 
+func (bl *blockListener) waitForBlockHeightInit(ctx context.Context) bool {
+	bl.canonicalChainLock.RLock()
+	highestBlockSet := bl.highestBlockSet
+	bl.canonicalChainLock.RUnlock()
+	if highestBlockSet {
+		return true
+	}
+	select {
+	case <-bl.initialBlockHeightObtained:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (bl *blockListener) GetHighestBlock(ctx context.Context) (uint64, bool) {
 	bl.checkAndStartListenerLoop()
 	// block height will be established as the first step of listener startup process
 	// so we don't need to wait for the entire startup process to finish to return the result
-	bl.canonicalChainLock.RLock()
-	highestBlockSet := bl.highestBlockSet
-	bl.canonicalChainLock.RUnlock()
-	// if not yet initialized, wait to be initialized
-	if !highestBlockSet {
-		select {
-		case <-bl.initialBlockHeightObtained:
-		case <-ctx.Done():
-			// Inform caller we timed out, or were closed
-			return 0, false
-		}
+	if !bl.waitForBlockHeightInit(ctx) {
+		return 0, false
 	}
 	bl.canonicalChainLock.RLock()
 	highestBlock := bl.highestBlock
@@ -737,11 +744,30 @@ func (bl *blockListener) GetHighestBlock(ctx context.Context) (uint64, bool) {
 	return highestBlock, true
 }
 
+func (bl *blockListener) GetHighestBlockInfo(ctx context.Context) (*ethrpc.BlockInfoJSONRPC, bool) {
+	bl.checkAndStartListenerLoop()
+	if !bl.waitForBlockHeightInit(ctx) {
+		return nil, false
+	}
+	bl.canonicalChainLock.RLock()
+	defer bl.canonicalChainLock.RUnlock()
+	if bl.headBlockInfo == nil {
+		return nil, false
+	}
+	return bl.headBlockInfo, true
+}
+
 // Gives a non-nil value only if the block listener is tracking the head and has access to the full block
 func (bl *blockListener) GetBlockGasLimit() *ethtypes.HexInteger {
 	bl.canonicalChainLock.RLock()
 	defer bl.canonicalChainLock.RUnlock()
-	return bl.highestBlockGasLimit
+	if bl.headBlockInfo == nil || bl.headBlockInfo.GasLimit == nil {
+		return nil
+	}
+	if bl.headBlockInfo.GasLimit.BigInt().Sign() <= 0 {
+		return nil
+	}
+	return bl.headBlockInfo.GasLimit
 }
 
 func (bl *blockListener) GetHeadBlockNumber(_ context.Context) uint64 {
@@ -755,15 +781,20 @@ func (bl *blockListener) setHighestBlock(block uint64) {
 	bl.highestBlockSet = true
 }
 
+// checkAndSetHighestBlock records the chain head height and caches full block info for the head.
+// highestBlock is often set first by eth_blockNumber during startup, before any full block arrives.
 // Caller MUST hold the canonicalChain WRITE LOCK
-func (bl *blockListener) checkAndSetHighestBlock(block uint64, blockGasLimit *ethtypes.HexInteger) {
+func (bl *blockListener) checkAndSetHighestBlock(bi *ethrpc.BlockInfoJSONRPC) {
+	block := bi.Number.Uint64()
 	if block > bl.highestBlock {
 		bl.highestBlock = block
 		bl.highestBlockSet = true
-		if blockGasLimit != nil && blockGasLimit.BigInt().Sign() > 0 {
-			bl.highestBlockGasLimit = blockGasLimit
-		}
+		bl.headBlockInfo = bi
+	} else if block == bl.highestBlock {
+		// Height already known from eth_blockNumber. Store the first full block at that height.
+		bl.headBlockInfo = bi
 	}
+	// Lower blocks are ignored. reconcileCanonicalChain also processes historical blocks during fork rebuilds.
 }
 
 // snapshot the whole view using the read-lock.

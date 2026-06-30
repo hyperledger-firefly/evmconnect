@@ -20,7 +20,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/stretchr/testify/require"
 )
 

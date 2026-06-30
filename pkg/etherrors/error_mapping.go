@@ -19,7 +19,7 @@ package etherrors
 import (
 	"strings"
 
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 type RPCMethodCategory int

@@ -25,15 +25,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/firefly-common/pkg/ffresty"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/retry"
-	"github.com/hyperledger/firefly-common/pkg/wsclient"
-	"github.com/hyperledger/firefly-evmconnect/mocks/rpcbackendmocks"
-	"github.com/hyperledger/firefly-evmconnect/pkg/ethrpc"
-	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
-	"github.com/hyperledger/firefly-signer/pkg/rpcbackend"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/ffresty"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/retry"
+	"github.com/hyperledger-firefly/common/pkg/wsclient"
+	"github.com/hyperledger-firefly/evmconnect/mocks/rpcbackendmocks"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -234,8 +234,9 @@ func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
 	require.Regexp(t, "FF23040", err)
 
 	_, err = NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
-		BlockCacheSize:   250,
-		ReceiptCacheSize: -1,
+		BlockCacheSize:      250,
+		ReceiptCacheSize:    -1,
+		MonitoredHeadLength: 1,
 	}, &ffresty.Config{}, &wsclient.WSConfig{})
 	require.Regexp(t, "FF23040", err)
 }
@@ -358,10 +359,11 @@ func TestBlockListenerOKSequential(t *testing.T) {
 		// block1003 has GasLimit set — inline to capture the extra field
 		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByHash", block1003Hash.String(), false).Return(nil).Run(func(args mock.Arguments) {
 			*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
-				Number:     1003,
-				Hash:       block1003Hash,
-				ParentHash: block1002Hash,
-				GasLimit:   ethtypes.NewHexInteger64(10000),
+				Number:        1003,
+				Hash:          block1003Hash,
+				ParentHash:    block1002Hash,
+				GasLimit:      ethtypes.NewHexInteger64(10000),
+				BaseFeePerGas: ethtypes.NewHexInteger64(7),
 			}}
 		})
 	})
@@ -389,6 +391,10 @@ func TestBlockListenerOKSequential(t *testing.T) {
 	mRPC.AssertExpectations(t)
 	assert.Len(t, bl.SnapshotMonitoredHeadChain(), bl.MonitoredHeadLength)
 	require.Equal(t, int64(10000), bl.GetBlockGasLimit().Int64())
+	headBlockInfo, ok := bl.GetHighestBlockInfo(context.Background())
+	require.True(t, ok)
+	require.True(t, headBlockInfo.SupportsEIP1559())
+	require.Equal(t, int64(10000), headBlockInfo.GasLimit.Int64())
 }
 
 func TestBlockListenerWSShoulderTap(t *testing.T) {
@@ -798,7 +804,7 @@ func TestBlockListenerReorgReplaceTail(t *testing.T) {
 
 func TestBlockListenerGap(t *testing.T) {
 
-	// See issue https://github.com/hyperledger/firefly-evmconnect/issues/10
+	// See issue https://github.com/hyperledger-firefly/evmconnect/issues/10
 	// We have seen that certain JSON/RPC endpoints might miss blocks during re-orgs, and our listener
 	// needs to cope with this. This means winding back when we find a gap and re-building our canonical
 	// view of the chain.
@@ -1342,4 +1348,106 @@ func TestWaitUntilStartedCancelledCtx(t *testing.T) {
 
 	done()
 	bl.waitUntilStarted(context.Background())
+}
+
+func TestCheckAndSetHighestBlock(t *testing.T) {
+	_, bl, _, _ := newTestBlockListener(t)
+
+	bi500 := &ethrpc.BlockInfoJSONRPC{
+		Number:   500,
+		GasLimit: ethtypes.NewHexInteger64(10000),
+	}
+	bl.canonicalChainLock.Lock()
+	bl.checkAndSetHighestBlock(bi500)
+	require.Equal(t, uint64(500), bl.highestBlock)
+	require.True(t, bl.highestBlockSet)
+	require.Same(t, bi500, bl.headBlockInfo)
+
+	bi500EIP1559 := &ethrpc.BlockInfoJSONRPC{
+		Number:        500,
+		GasLimit:      ethtypes.NewHexInteger64(20000),
+		BaseFeePerGas: ethtypes.NewHexInteger64(7),
+	}
+	bl.checkAndSetHighestBlock(bi500EIP1559)
+	require.Same(t, bi500EIP1559, bl.headBlockInfo)
+
+	bl.checkAndSetHighestBlock(&ethrpc.BlockInfoJSONRPC{Number: 499})
+	require.Same(t, bi500EIP1559, bl.headBlockInfo)
+	bl.canonicalChainLock.Unlock()
+}
+
+func TestGetBlockGasLimitFromHeadBlockInfo(t *testing.T) {
+	_, bl, _, _ := newTestBlockListener(t)
+	require.Nil(t, bl.GetBlockGasLimit())
+
+	bl.canonicalChainLock.Lock()
+	bl.headBlockInfo = &ethrpc.BlockInfoJSONRPC{GasLimit: ethtypes.NewHexInteger64(0)}
+	bl.canonicalChainLock.Unlock()
+	require.Nil(t, bl.GetBlockGasLimit())
+
+	bl.canonicalChainLock.Lock()
+	bl.headBlockInfo = &ethrpc.BlockInfoJSONRPC{}
+	bl.canonicalChainLock.Unlock()
+	require.Nil(t, bl.GetBlockGasLimit())
+}
+
+func TestGetHighestBlockInfoBeforeHeadBlockSeen(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+
+	mockInitialBlockHeight(mRPC, 500)
+	mockSeedBlockNotFound(mRPC, 500-(50-1)).Maybe()
+	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
+	mockFilterChangesEmpty(mRPC).Maybe()
+
+	_, ok := bl.GetHighestBlock(bl.ctx)
+	require.True(t, ok)
+
+	headInfo, ok := bl.GetHighestBlockInfo(bl.ctx)
+	require.False(t, ok)
+	require.Nil(t, headInfo)
+
+	done()
+}
+
+func TestGetHighestBlockInfoReturnsHeadBlock(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+
+	mockInitialBlockHeight(mRPC, 123)
+	mockSeedBlockNotFound(mRPC, 123-(50-1)).Maybe()
+	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
+	mockFilterChangesEmpty(mRPC).Maybe()
+
+	bi := &ethrpc.BlockInfoJSONRPC{
+		Number:        123,
+		BaseFeePerGas: ethtypes.NewHexInteger64(1),
+		GasLimit:      ethtypes.NewHexInteger64(5000),
+	}
+	bl.canonicalChainLock.Lock()
+	bl.headBlockInfo = bi
+	bl.canonicalChainLock.Unlock()
+
+	headInfo, ok := bl.GetHighestBlockInfo(bl.ctx)
+	require.True(t, ok)
+	require.Same(t, bi, headInfo)
+	require.True(t, headInfo.SupportsEIP1559())
+	require.Equal(t, int64(5000), bl.GetBlockGasLimit().Int64())
+
+	done()
+}
+
+func TestGetHighestBlockInfoCancelledBeforeInit(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
+	mockFilterChangesEmpty(mRPC).Maybe()
+	done()
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").
+		Return(&rpcbackend.RPCError{Message: "pop"})
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, ok := bl.GetHighestBlockInfo(cancelledCtx)
+	require.False(t, ok)
+
+	<-bl.listenLoopDone
 }

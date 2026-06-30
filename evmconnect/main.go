@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/hyperledger/firefly-evmconnect/cmd"
+	"github.com/hyperledger-firefly/evmconnect/cmd"
 )
 
 func main() {
