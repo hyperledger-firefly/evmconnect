@@ -57,6 +57,9 @@ func (bl *blockListener) getReceiptAndBlock(ctx context.Context, txHash string) 
 }
 
 func (bl *blockListener) GetTransactionReceipt(ctx context.Context, txHash string) (ethReceipt *ethrpc.TxReceiptJSONRPC, err error) {
+	if receipt, ok := bl.getCachedTransactionReceipt(txHash); ok {
+		return receipt, nil
+	}
 	rpcErr := bl.backend.CallRPC(ctx, &ethReceipt, "eth_getTransactionReceipt", txHash)
 	if rpcErr != nil || ethReceipt == nil {
 		var err error

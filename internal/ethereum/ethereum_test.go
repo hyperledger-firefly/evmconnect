@@ -147,6 +147,12 @@ func TestConnectorInit(t *testing.T) {
 	assert.Regexp(t, "FF23040", err)
 
 	conf.Set(TxCacheSize, "1")
+	conf.Set(ReceiptCacheEnabled, true)
+	conf.Set(ReceiptCacheSize, "-1")
+	cc, err = NewEthereumConnector(context.Background(), conf)
+	assert.Regexp(t, "FF23040", err)
+
+	conf.Set(ReceiptCacheSize, "1")
 	conf.Set(EventsCatchupDownscaleRegex, "[")
 	cc, err = NewEthereumConnector(context.Background(), conf)
 	assert.Regexp(t, "FF23051", err)

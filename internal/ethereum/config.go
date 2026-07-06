@@ -27,6 +27,8 @@ const (
 	ConfigDataFormat            = "dataFormat"
 	BlockPollingInterval        = "blockPollingInterval"
 	BlockCacheSize              = "blockCacheSize"
+	ReceiptCacheEnabled         = "receiptCache.enabled"
+	ReceiptCacheSize            = "receiptCache.size"
 	ChainTrackingMode           = "chainTrackingMode"
 	EventsCatchupPageSize       = "events.catchupPageSize"
 	EventsCatchupThreshold      = "events.catchupThreshold"
@@ -71,6 +73,8 @@ func InitConfig(conf config.Section) {
 	wsclient.InitConfig(conf)
 	conf.AddKnownKey(WebSocketsEnabled, false)
 	conf.AddKnownKey(BlockCacheSize, 250)
+	conf.AddKnownKey(ReceiptCacheEnabled, false)
+	conf.AddKnownKey(ReceiptCacheSize, 5000)
 	conf.AddKnownKey(BlockPollingInterval, "1s")
 	conf.AddKnownKey(ChainTrackingMode, ffcapi.ChainTrackingModeFull)
 	conf.AddKnownKey(ConfigDataFormat, "map")
