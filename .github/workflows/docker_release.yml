@@ -32,22 +32,22 @@ jobs:
       - name: Set latest tag
         if: github.event.action == 'released'
         run: |
-          echo "DOCKER_TAGS=${{ env.DOCKER_TAGS }},ghcr.io/${{ github.repository }}:latest" >> $GITHUB_ENV
+          echo "DOCKER_TAGS=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_ENV
 
       - name: Set alpha tag
-        if: github.event.action == 'prereleased' && contains(github.ref, 'alpha')
+        if: github.event.action == 'prereleased' && contains(github.event.release.tag_name, 'alpha')
         run: |
-          echo "DOCKER_TAGS=${{ env.DOCKER_TAGS }},ghcr.io/${{ github.repository }}:alpha" >> $GITHUB_ENV
+          echo "DOCKER_TAGS=ghcr.io/${{ github.repository }}:alpha" >> $GITHUB_ENV
 
       - name: Set beta tag
-        if: github.event.action == 'prereleased' && contains(github.ref, 'beta')
+        if: github.event.action == 'prereleased' && contains(github.event.release.tag_name, 'beta')
         run: |
-          echo "DOCKER_TAGS=${{ env.DOCKER_TAGS }},ghcr.io/${{ github.repository }}:beta" >> $GITHUB_ENV
+          echo "DOCKER_TAGS=ghcr.io/${{ github.repository }}:beta" >> $GITHUB_ENV
 
       - name: Set rc tag
-        if: github.event.action == 'prereleased' && contains(github.ref, 'rc')
+        if: github.event.action == 'prereleased' && contains(github.event.release.tag_name, 'rc')
         run: |
-          echo "DOCKER_TAGS=${{ env.DOCKER_TAGS }},ghcr.io/${{ github.repository }}:rc" >> $GITHUB_ENV
+          echo "DOCKER_TAGS=ghcr.io/${{ github.repository }}:rc" >> $GITHUB_ENV
 
       - name: Set build tag
         id: build_tag_generator
@@ -68,7 +68,7 @@ jobs:
           push: true
           platforms: linux/amd64
           provenance: false
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }},ghcr.io/${{ github.repository }}:head,${{ env.DOCKER_TAGS }}
+          tags: ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }},ghcr.io/${{ github.repository }}:head${{ env.DOCKER_TAGS != '' && format(',{0}', env.DOCKER_TAGS) || '' }}
           labels: |
             commit=${{ github.sha }}
             build_date=${{ steps.build_tag_generator.outputs.BUILD_DATE }}
@@ -77,4 +77,4 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
           build-args: |
             BUILD_VERSION=${{ steps.build_tag_generator.outputs.RELEASE_TAG }}
-            GIT_REF=${{ github.ref }}
+            GIT_REF=refs/tags/${{ github.event.release.tag_name }}
