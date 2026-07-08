@@ -62,6 +62,8 @@ type BlockListenerConfig struct {
 	BlockPollingInterval          time.Duration            `json:"blockPollingInterval"`
 	HederaCompatibilityMode       bool                     `json:"hederaCompatibilityMode"`
 	BlockCacheSize                int                      `json:"blockCacheSize"`
+	ReceiptCacheEnabled           bool                     `json:"receiptCacheEnabled"`
+	ReceiptCacheSize              int                      `json:"receiptCacheSize"`
 	IncludeLogsBloom              bool                     `json:"includeLogsBloom"`
 	UseGetBlockReceipts           bool                     `json:"useGetBlockReceipts"`
 	MaxAsyncBlockFetchConcurrency int                      `json:"maxAsyncBlockFetchConcurrency"`
@@ -122,6 +124,7 @@ type blockListener struct {
 	consumerMux                   sync.Mutex // covers consumers and listenLoopDone
 	consumers                     map[fftypes.UUID]*BlockUpdateConsumer
 	blockCache                    *lru.Cache
+	txReceiptCache                *lru.Cache
 	blockFetchConcurrencyThrottle chan *blockReceiptRequest
 	BlockListenerConfig
 
@@ -132,6 +135,10 @@ type blockListener struct {
 	highestBlockSet     bool
 	highestBlock        uint64
 	headBlockInfo       *ethrpc.BlockInfoJSONRPC // full info for the current head block, when seen
+
+	// tx receipts indexed during canonical chain build, keyed by transaction hash
+	txReceiptCacheLock       sync.RWMutex
+	txReceiptCacheGeneration uint64
 
 	// headBlockNumber mode: last head value sent on the block listener channel (only written from listenLoop)
 	currentChainHead uint64
@@ -177,6 +184,12 @@ func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf
 	bl.blockCache, err = lru.New(conf.BlockCacheSize)
 	if err != nil {
 		return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "block")
+	}
+	if conf.ReceiptCacheEnabled {
+		bl.txReceiptCache, err = lru.New(conf.ReceiptCacheSize)
+		if err != nil {
+			return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "receipt")
+		}
 	}
 	return bl, nil
 }
@@ -521,7 +534,9 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 
 	// Ok, we can add this block
 	var newElem *list.Element
+	forkTrim := false
 	if addAfter == nil {
+		bl.resetReceiptCache()
 		_ = bl.canonicalChain.Init()
 		newElem = bl.canonicalChain.PushBack(mbi)
 	} else {
@@ -534,6 +549,7 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 			toRemove := nextElem
 			nextElem = nextElem.Next()
 			_ = bl.canonicalChain.Remove(toRemove)
+			forkTrim = true
 		}
 	}
 
@@ -541,6 +557,11 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 	for bl.canonicalChain.Len() > bl.MonitoredHeadLength {
 		_ = bl.canonicalChain.Remove(bl.canonicalChain.Front())
 	}
+
+	if forkTrim {
+		bl.resetReceiptCache()
+	}
+	bl.fetchAndCacheBlockReceipts(mbi)
 
 	log.L(bl.ctx).Debugf("Added block %d / %s parent=%s to in-memory canonical chain (new length=%d)", mbi.Number.Uint64(), mbi.Hash, mbi.ParentHash, bl.canonicalChain.Len())
 
@@ -553,8 +574,10 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 //
 // Caller MUST hold the canonicalChain WRITE LOCK
 func (bl *blockListener) rebuildCanonicalChain() *list.Element {
+	bl.resetReceiptCache()
 	// If none of our blocks were valid, start from the first block number we've notified about previously
 	lastValidBlock := bl.trimToLastValidBlock()
+	bl.refetchReceiptsForCanonicalChain()
 	var nextBlockNumber uint64
 	var expectedParentHash ethtypes.HexBytes0xPrefix
 	if lastValidBlock != nil {
@@ -606,6 +629,7 @@ func (bl *blockListener) rebuildCanonicalChain() *list.Element {
 		}
 
 		bl.checkAndSetHighestBlock(bi)
+		bl.fetchAndCacheBlockReceipts(bi)
 
 	}
 	return notifyPos

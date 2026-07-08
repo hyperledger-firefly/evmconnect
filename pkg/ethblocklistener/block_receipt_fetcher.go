@@ -104,3 +104,85 @@ func (brr *blockReceiptRequest) run() {
 	// No early return in this function - return must happen by reaching here
 	earlyExit = false
 }
+
+// resetReceiptCache clears all cached transaction receipts when the canonical chain
+// changes (fork trim, chain rebuild, or re-initialization). Receipts are keyed only by
+// transaction hash, so after a reorg the same hash can refer to a block that is no
+// longer canonical. Purging avoids serving stale receipts.
+//
+// The generation counter invalidates any in-flight async fetches that complete after
+// the reset, so they cannot repopulate the cache with orphaned data.
+//
+// The current implementation is intentionally brute-force.
+// All receipts are dropped and refetched for the whole canonical chain at once.
+// Selective invalidation by block height or hash could be more efficient and is a
+// candidate for future enhancement if re-orgs are frequent enough to justify the complexity.
+func (bl *blockListener) resetReceiptCache() {
+	if bl.txReceiptCache == nil {
+		return
+	}
+	bl.txReceiptCacheLock.Lock()
+	defer bl.txReceiptCacheLock.Unlock()
+	bl.txReceiptCache.Purge()
+	bl.txReceiptCacheGeneration++
+}
+
+func (bl *blockListener) getReceiptCacheGeneration() uint64 {
+	bl.txReceiptCacheLock.RLock()
+	defer bl.txReceiptCacheLock.RUnlock()
+	return bl.txReceiptCacheGeneration
+}
+
+func (bl *blockListener) storeReceiptsInCache(receipts []*ethrpc.TxReceiptJSONRPC, generation uint64) {
+	if bl.txReceiptCache == nil {
+		return
+	}
+	bl.txReceiptCacheLock.Lock()
+	defer bl.txReceiptCacheLock.Unlock()
+	if generation != bl.txReceiptCacheGeneration {
+		return
+	}
+	for _, r := range receipts {
+		if r != nil && r.TransactionHash != nil {
+			bl.txReceiptCache.Add(r.TransactionHash.String(), r)
+		}
+	}
+}
+
+func (bl *blockListener) getCachedTransactionReceipt(txHash string) (*ethrpc.TxReceiptJSONRPC, bool) {
+	if bl.txReceiptCache == nil {
+		return nil, false
+	}
+	bl.txReceiptCacheLock.RLock()
+	defer bl.txReceiptCacheLock.RUnlock()
+	cached, ok := bl.txReceiptCache.Get(txHash)
+	if !ok {
+		return nil, false
+	}
+	return cached.(*ethrpc.TxReceiptJSONRPC), true
+}
+
+func (bl *blockListener) fetchAndCacheBlockReceipts(bi *ethrpc.BlockInfoJSONRPC) {
+	if bl.txReceiptCache == nil {
+		return
+	}
+	generation := bl.getReceiptCacheGeneration()
+	bl.FetchBlockReceiptsAsync(bi.Number.Uint64(), bi.Hash, func(receipts []*ethrpc.TxReceiptJSONRPC, err error) {
+		if err != nil {
+			log.L(bl.ctx).Debugf("Failed to fetch receipts for block %d / %s: %v", bi.Number.Uint64(), bi.Hash, err)
+			return
+		}
+		bl.storeReceiptsInCache(receipts, generation)
+	})
+}
+
+func (bl *blockListener) refetchReceiptsForCanonicalChain() {
+	if bl.txReceiptCache == nil {
+		return
+	}
+	for pos := bl.canonicalChain.Front(); pos != nil; pos = pos.Next() {
+		if pos.Value != nil {
+			bl.fetchAndCacheBlockReceipts(pos.Value.(*ethrpc.BlockInfoJSONRPC))
+		}
+	}
+}
