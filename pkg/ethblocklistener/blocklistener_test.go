@@ -244,24 +244,23 @@ func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
 }
 
 func TestBlockListenerStartGettingHighestBlockRetry(t *testing.T) {
+	testLatch := newTestLatch()
 
 	_, bl, mRPC, done := newTestBlockListener(t)
 
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").
 		Return(&rpcbackend.RPCError{Message: "pop"}).Once()
 	mockInitialBlockHeight(mRPC, 12345)
-	mockSeedBlockNotFound(mRPC, 12345-(50-1)).Maybe()
-	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
-	mockFilterChangesEmpty(mRPC).Maybe()
+	mockSeedBlockNotFound(mRPC, 12345-(50-1)).Once()
+	mockNewBlockFilter(mRPC, testBlockFilterID1).Once()
+	mockFilterChangesEmpty(mRPC, testLatch.complete).Once()
 
 	h, ok := bl.GetHighestBlock(bl.ctx)
 	assert.Equal(t, uint64(12345), h)
 	assert.True(t, ok)
+
+	testLatch.waitComplete()
 	done()
-
-	<-bl.listenLoopDone
-
-	mRPC.AssertExpectations(t)
 }
 
 func TestBlockListenerStartGettingHighestBlockFailBeforeStop(t *testing.T) {
