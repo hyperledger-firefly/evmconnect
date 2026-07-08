@@ -16,7 +16,6 @@ RUN DB_MIGRATIONS_DIR=$(go list -f '{{.Dir}}' github.com/hyperledger-firefly/tra
 
 FROM alpine:3.21.3
 WORKDIR /evmconnect
-RUN addgroup -g 1001 evmgroup && adduser -D -u 1001 -G evmgroup evmuser
 RUN chgrp -R 0 /evmconnect \
   && chmod -R g+rwX /evmconnect
 RUN apk add --no-cache curl jq
