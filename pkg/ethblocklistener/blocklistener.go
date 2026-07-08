@@ -589,21 +589,17 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 //
 // Caller MUST hold the canonicalChain WRITE LOCK
 func (bl *blockListener) rebuildCanonicalChain() *list.Element {
-	bl.resetReceiptCache()
 	// If none of our blocks were valid, start from the first block number we've notified about previously
 	lastValidBlock := bl.trimToLastValidBlock()
 	var nextBlockNumber uint64
 	var expectedParentHash ethtypes.HexBytes0xPrefix
 	if lastValidBlock != nil {
-		// The chain now holds only the surviving prefix, whose receipts were purged by the
-		// reset above - queue fetches to restore them. When no valid block was found the
-		// chain still holds stale blocks and is re-initialized below, so there is nothing
-		// worth refetching.
-		bl.queueReceiptFetchesForCanonicalChain()
 		nextBlockNumber = lastValidBlock.Number.Uint64() + 1
 		log.L(bl.ctx).Infof("Canonical chain partially rebuilding from block %d", nextBlockNumber)
 		expectedParentHash = lastValidBlock.Hash
 	} else {
+		// no valid block found, so we need to re-initialize the chain
+		bl.resetReceiptCache()
 		firstBlock := bl.canonicalChain.Front()
 		if firstBlock == nil || firstBlock.Value == nil {
 			return nil
@@ -659,6 +655,7 @@ func (bl *blockListener) trimToLastValidBlock() (lastValidBlock *ethrpc.BlockInf
 	// First remove from the end until we get a block that matches the current un-cached query view from the chain
 	lastElem := bl.canonicalChain.Back()
 	var startingNumber *uint64
+	var trimmedBlocks []*ethrpc.BlockInfoJSONRPC
 	for lastElem != nil && lastElem.Value != nil {
 
 		// Query the block that is no at this blockNumber
@@ -690,8 +687,12 @@ func (bl *blockListener) trimToLastValidBlock() (lastValidBlock *ethrpc.BlockInf
 			}
 			break
 		}
+		trimmedBlocks = append(trimmedBlocks, currentViewBlock)
 		lastElem = lastElem.Prev()
 	}
+	// Invalidate cached receipts for the trimmed blocks in one pass. If no valid block was
+	// found the caller resets the whole cache anyway, but invalidating here is still safe.
+	bl.invalidateReceiptsForForkTrim(trimmedBlocks)
 
 	if startingNumber != nil && lastValidBlock != nil && *startingNumber != lastValidBlock.Number.Uint64() {
 		log.L(bl.ctx).Debugf("Canonical chain trimmed from block %d to block %d (total number of in memory blocks: %d)", startingNumber, lastValidBlock.Number.Uint64(), bl.MonitoredHeadLength)

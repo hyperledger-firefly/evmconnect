@@ -106,8 +106,8 @@ func (brr *blockReceiptRequest) run() {
 }
 
 // resetReceiptCache clears all cached transaction receipts when the canonical chain
-// is rebuilt or re-initialized. Receipts are keyed only by transaction hash, so after
-// a reorg the same hash can refer to a block that is no longer canonical.
+// is re-initialized with no valid existing block. Receipts are keyed only by transaction
+// hash, so after a reorg the same hash can refer to a block that is no longer canonical.
 //
 // The generation counter invalidates any in-flight async fetches that complete after
 // the reset, so they cannot repopulate the cache with orphaned data.
@@ -147,8 +147,8 @@ func (bl *blockListener) invalidateReceiptsForForkTrim(trimmedBlocks []*ethrpc.B
 	// only removed when a trimmed block becomes canonical again, so on a long-running
 	// listener the set would otherwise grow with every fork trim. Hitting the bound
 	// falls back to a full cache reset, which is always safe.
-	// On a full rebuild of the canonical chain, the cache is reset anyway, so not
-	// affected by this check.
+	// When no valid block was found during a rebuild, the cache is fully reset anyway, so
+	// that path is not affected by this check.
 	if len(bl.invalidatedReceiptBlockHashes)+len(trimmedBlocks) > bl.MonitoredHeadLength {
 		bl.resetReceiptCacheLocked()
 		return
@@ -243,18 +243,6 @@ func (bl *blockListener) queueReceiptFetch(bi *ethrpc.BlockInfoJSONRPC) {
 		blockInfo:  bi,
 		generation: bl.getReceiptCacheGeneration(),
 	})
-}
-
-// Caller MUST hold the canonicalChain WRITE LOCK
-func (bl *blockListener) queueReceiptFetchesForCanonicalChain() {
-	if bl.txReceiptCache == nil {
-		return
-	}
-	for pos := bl.canonicalChain.Front(); pos != nil; pos = pos.Next() {
-		if pos.Value != nil {
-			bl.queueReceiptFetch(pos.Value.(*ethrpc.BlockInfoJSONRPC))
-		}
-	}
 }
 
 // dispatchPendingReceiptFetches starts the async receipt fetches for blocks queued by
