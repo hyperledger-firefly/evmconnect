@@ -137,8 +137,8 @@
 
 |Key|Description|Type|Default Value|
 |---|-----------|----|-------------|
-|enabled|When true, transaction receipts fetched during canonical chain build are cached in memory for reuse|`boolean`|`false`
-|size|Maximum of transaction receipts to hold in the receipt cache|`int`|`5000`
+|enabled|When true, transaction receipts fetched during canonical chain build are cached in memory and served for receipt queries.|`boolean`|`false`
+|size|Maximum number of transaction receipts to hold in the receipt cache|`int`|`5000`
 
 ## connector.retry
 
