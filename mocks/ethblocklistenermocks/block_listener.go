@@ -276,6 +276,36 @@ func (_m *BlockListener) GetHighestBlock(ctx context.Context) (uint64, bool) {
 	return r0, r1
 }
 
+// GetHighestBlockInfo provides a mock function with given fields: ctx
+func (_m *BlockListener) GetHighestBlockInfo(ctx context.Context) (*ethrpc.BlockInfoJSONRPC, bool) {
+	ret := _m.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetHighestBlockInfo")
+	}
+
+	var r0 *ethrpc.BlockInfoJSONRPC
+	var r1 bool
+	if rf, ok := ret.Get(0).(func(context.Context) (*ethrpc.BlockInfoJSONRPC, bool)); ok {
+		return rf(ctx)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context) *ethrpc.BlockInfoJSONRPC); ok {
+		r0 = rf(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*ethrpc.BlockInfoJSONRPC)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context) bool); ok {
+		r1 = rf(ctx)
+	} else {
+		r1 = ret.Get(1).(bool)
+	}
+
+	return r0, r1
+}
+
 // GetMonitoredHeadLength provides a mock function with no fields
 func (_m *BlockListener) GetMonitoredHeadLength() int {
 	ret := _m.Called()
