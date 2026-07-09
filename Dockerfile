@@ -14,7 +14,7 @@ RUN make
 RUN DB_MIGRATIONS_DIR=$(go list -f '{{.Dir}}' github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi | sed 's|pkg/ffcapi|db|') \
   && cp -R "$DB_MIGRATIONS_DIR" db
 
-FROM alpine:3.21.3
+FROM alpine:3.24.1
 WORKDIR /evmconnect
 RUN chgrp -R 0 /evmconnect \
   && chmod -R g+rwX /evmconnect
