@@ -137,8 +137,10 @@ type blockListener struct {
 	headBlockInfo       *ethrpc.BlockInfoJSONRPC // full info for the current head block, when seen
 
 	// tx receipts indexed during canonical chain build, keyed by transaction hash
-	txReceiptCacheLock       sync.RWMutex
-	txReceiptCacheGeneration uint64
+	txReceiptCacheLock            sync.RWMutex
+	txReceiptCacheGeneration      uint64
+	invalidatedReceiptBlockHashes map[string]struct{}
+	pendingReceiptFetches         []*pendingReceiptFetch // queued under the canonicalChain write lock, dispatched after it is released
 
 	// headBlockNumber mode: last head value sent on the block listener channel (only written from listenLoop)
 	currentChainHead uint64
@@ -190,6 +192,7 @@ func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf
 		if err != nil {
 			return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "receipt")
 		}
+		bl.invalidatedReceiptBlockHashes = make(map[string]struct{})
 	}
 	return bl, nil
 }
@@ -487,8 +490,19 @@ func (bl *blockListener) listenLoop() {
 // work backwards building a new view and notify about all blocks that are changed in that process.
 func (bl *blockListener) reconcileCanonicalChain(bi *ethrpc.BlockInfoJSONRPC) *list.Element {
 	bl.canonicalChainLock.Lock()
-	defer bl.canonicalChainLock.Unlock()
+	pos := bl.reconcileCanonicalChainLocked(bi)
+	pending := bl.pendingReceiptFetches
+	bl.pendingReceiptFetches = nil
+	bl.canonicalChainLock.Unlock()
 
+	// Dispatch queued receipt fetches only after releasing the lock - dispatch blocks when
+	// the fetch concurrency throttle is saturated, and must not stall readers of the chain
+	bl.dispatchPendingReceiptFetches(pending)
+	return pos
+}
+
+// Caller MUST hold the canonicalChain WRITE LOCK
+func (bl *blockListener) reconcileCanonicalChainLocked(bi *ethrpc.BlockInfoJSONRPC) *list.Element {
 	bl.checkAndSetHighestBlock(bi)
 
 	// Find the position of this block in the block sequence
@@ -534,7 +548,6 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 
 	// Ok, we can add this block
 	var newElem *list.Element
-	forkTrim := false
 	if addAfter == nil {
 		bl.resetReceiptCache()
 		_ = bl.canonicalChain.Init()
@@ -544,12 +557,18 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 		// Trim everything from this point onwards. Note that the following cases are covered on other paths:
 		// - This was just a duplicate notification of a block that fits into our chain - discarded in reconcileCanonicalChain()
 		// - There was a gap before us in the chain, and the tail is still valid - we would have called rebuildCanonicalChain() above
+		var trimmedBlocks []*ethrpc.BlockInfoJSONRPC
 		nextElem := newElem.Next()
 		for nextElem != nil {
 			toRemove := nextElem
 			nextElem = nextElem.Next()
+			if toRemove.Value != nil {
+				trimmedBlocks = append(trimmedBlocks, toRemove.Value.(*ethrpc.BlockInfoJSONRPC))
+			}
 			_ = bl.canonicalChain.Remove(toRemove)
-			forkTrim = true
+		}
+		if len(trimmedBlocks) > 0 {
+			bl.invalidateReceiptsForForkTrim(trimmedBlocks)
 		}
 	}
 
@@ -557,11 +576,7 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 	for bl.canonicalChain.Len() > bl.MonitoredHeadLength {
 		_ = bl.canonicalChain.Remove(bl.canonicalChain.Front())
 	}
-
-	if forkTrim {
-		bl.resetReceiptCache()
-	}
-	bl.fetchAndCacheBlockReceipts(mbi)
+	bl.queueReceiptFetch(mbi)
 
 	log.L(bl.ctx).Debugf("Added block %d / %s parent=%s to in-memory canonical chain (new length=%d)", mbi.Number.Uint64(), mbi.Hash, mbi.ParentHash, bl.canonicalChain.Len())
 
@@ -574,10 +589,8 @@ func (bl *blockListener) handleNewBlock(mbi *ethrpc.BlockInfoJSONRPC, addAfter *
 //
 // Caller MUST hold the canonicalChain WRITE LOCK
 func (bl *blockListener) rebuildCanonicalChain() *list.Element {
-	bl.resetReceiptCache()
 	// If none of our blocks were valid, start from the first block number we've notified about previously
 	lastValidBlock := bl.trimToLastValidBlock()
-	bl.refetchReceiptsForCanonicalChain()
 	var nextBlockNumber uint64
 	var expectedParentHash ethtypes.HexBytes0xPrefix
 	if lastValidBlock != nil {
@@ -585,6 +598,8 @@ func (bl *blockListener) rebuildCanonicalChain() *list.Element {
 		log.L(bl.ctx).Infof("Canonical chain partially rebuilding from block %d", nextBlockNumber)
 		expectedParentHash = lastValidBlock.Hash
 	} else {
+		// no valid block found, so we need to re-initialize the chain
+		bl.resetReceiptCache()
 		firstBlock := bl.canonicalChain.Front()
 		if firstBlock == nil || firstBlock.Value == nil {
 			return nil
@@ -629,7 +644,7 @@ func (bl *blockListener) rebuildCanonicalChain() *list.Element {
 		}
 
 		bl.checkAndSetHighestBlock(bi)
-		bl.fetchAndCacheBlockReceipts(bi)
+		bl.queueReceiptFetch(bi)
 
 	}
 	return notifyPos
@@ -640,6 +655,7 @@ func (bl *blockListener) trimToLastValidBlock() (lastValidBlock *ethrpc.BlockInf
 	// First remove from the end until we get a block that matches the current un-cached query view from the chain
 	lastElem := bl.canonicalChain.Back()
 	var startingNumber *uint64
+	var trimmedBlocks []*ethrpc.BlockInfoJSONRPC
 	for lastElem != nil && lastElem.Value != nil {
 
 		// Query the block that is no at this blockNumber
@@ -671,8 +687,12 @@ func (bl *blockListener) trimToLastValidBlock() (lastValidBlock *ethrpc.BlockInf
 			}
 			break
 		}
+		trimmedBlocks = append(trimmedBlocks, currentViewBlock)
 		lastElem = lastElem.Prev()
 	}
+	// Invalidate cached receipts for the trimmed blocks in one pass. If no valid block was
+	// found the caller resets the whole cache anyway, but invalidating here is still safe.
+	bl.invalidateReceiptsForForkTrim(trimmedBlocks)
 
 	if startingNumber != nil && lastValidBlock != nil && *startingNumber != lastValidBlock.Number.Uint64() {
 		log.L(bl.ctx).Debugf("Canonical chain trimmed from block %d to block %d (total number of in memory blocks: %d)", startingNumber, lastValidBlock.Number.Uint64(), bl.MonitoredHeadLength)

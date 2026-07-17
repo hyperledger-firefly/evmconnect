@@ -244,24 +244,23 @@ func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
 }
 
 func TestBlockListenerStartGettingHighestBlockRetry(t *testing.T) {
+	testLatch := newTestLatch()
 
 	_, bl, mRPC, done := newTestBlockListener(t)
 
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").
 		Return(&rpcbackend.RPCError{Message: "pop"}).Once()
 	mockInitialBlockHeight(mRPC, 12345)
-	mockSeedBlockNotFound(mRPC, 12345-(50-1)).Maybe()
-	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
-	mockFilterChangesEmpty(mRPC).Maybe()
+	mockSeedBlockNotFound(mRPC, 12345-(50-1)).Once()
+	mockNewBlockFilter(mRPC, testBlockFilterID1).Once()
+	mockFilterChangesEmpty(mRPC, testLatch.complete).Once()
 
 	h, ok := bl.GetHighestBlock(bl.ctx)
 	assert.Equal(t, uint64(12345), h)
 	assert.True(t, ok)
+
+	testLatch.waitComplete()
 	done()
-
-	<-bl.listenLoopDone
-
-	mRPC.AssertExpectations(t)
 }
 
 func TestBlockListenerStartGettingHighestBlockFailBeforeStop(t *testing.T) {
@@ -751,6 +750,66 @@ func TestTrimToLastValidBlockRemovesInvalidTail(t *testing.T) {
 	tail := bl.canonicalChain.Back().Value.(*ethrpc.BlockInfoJSONRPC)
 	require.Equal(t, uint64(100), tail.Number.Uint64())
 	require.True(t, tail.Hash.Equals(h100))
+
+	mRPC.AssertExpectations(t)
+}
+
+// TestTrimToLastValidBlockInvalidatesTrimmedReceiptsOnly covers the receipt cache wiring of a
+// partial rebuild. Receipts for the surviving prefix stay cached, receipts for the trimmed
+// stale tail are invalidated, and the cache generation is unchanged (no full reset).
+func TestTrimToLastValidBlockInvalidatesTrimmedReceiptsOnly(t *testing.T) {
+	h99 := testBlockHashFor(99)
+	h100 := testBlockHashFor(100)
+	h101Stale := testBlockHashFor(101, 999)
+	h102Stale := testBlockHashFor(102, 999)
+	h101 := testBlockHashFor(101)
+	h102 := testBlockHashFor(102)
+
+	_, bl, mRPC, done := newTestBlockListener(t)
+	defer done()
+
+	mockBlockByNumber(mRPC, 102, &h102).Once()
+	mockBlockByNumber(mRPC, 101, &h101).Once()
+	mockBlockByNumber(mRPC, 100, &h100).Once()
+
+	tx100 := ethtypes.MustNewHexBytes0xPrefix("0x1000000000000000000000000000000000000000000000000000000000000001")
+	tx101 := ethtypes.MustNewHexBytes0xPrefix("0x1010000000000000000000000000000000000000000000000000000000000001")
+	tx102 := ethtypes.MustNewHexBytes0xPrefix("0x1020000000000000000000000000000000000000000000000000000000000001")
+
+	gen := bl.getReceiptCacheGeneration()
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{TransactionHash: tx100, BlockHash: h100},
+		{TransactionHash: tx101, BlockHash: h101Stale},
+		{TransactionHash: tx102, BlockHash: h102Stale},
+	}, gen, nil)
+
+	b100 := &ethrpc.BlockInfoJSONRPC{Number: ethtypes.HexUint64(100), Hash: h100, ParentHash: h99, Transactions: []ethtypes.HexBytes0xPrefix{tx100}}
+	b101 := &ethrpc.BlockInfoJSONRPC{Number: ethtypes.HexUint64(101), Hash: h101Stale, ParentHash: h100, Transactions: []ethtypes.HexBytes0xPrefix{tx101}}
+	b102 := &ethrpc.BlockInfoJSONRPC{Number: ethtypes.HexUint64(102), Hash: h102Stale, ParentHash: h101Stale, Transactions: []ethtypes.HexBytes0xPrefix{tx102}}
+
+	bl.canonicalChainLock.Lock()
+	bl.canonicalChain.PushBack(b100)
+	bl.canonicalChain.PushBack(b101)
+	bl.canonicalChain.PushBack(b102)
+	lastValid := bl.trimToLastValidBlock()
+	bl.canonicalChainLock.Unlock()
+
+	require.NotNil(t, lastValid)
+	require.Equal(t, uint64(100), lastValid.Number.Uint64())
+
+	// Prefix receipt survives, trimmed tail receipts are gone, and no full cache reset happened
+	_, ok := bl.getCachedTransactionReceipt(tx100.String())
+	assert.True(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(tx101.String())
+	assert.False(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(tx102.String())
+	assert.False(t, ok)
+	assert.Equal(t, gen, bl.getReceiptCacheGeneration())
+
+	// A late async fetch result for a trimmed block must be discarded
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{TransactionHash: tx101, BlockHash: h101Stale}}, gen, h101Stale)
+	_, ok = bl.getCachedTransactionReceipt(tx101.String())
+	assert.False(t, ok)
 
 	mRPC.AssertExpectations(t)
 }
