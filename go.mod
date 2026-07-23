@@ -7,7 +7,7 @@ toolchain go1.26.4
 require (
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/golang-lru v1.0.2
-	github.com/hyperledger-firefly/common v1.6.3
+	github.com/hyperledger-firefly/common v1.6.5
 	github.com/hyperledger-firefly/signer v1.2.1
 	github.com/hyperledger-firefly/transaction-manager v1.5.1
 	github.com/sirupsen/logrus v1.9.4
