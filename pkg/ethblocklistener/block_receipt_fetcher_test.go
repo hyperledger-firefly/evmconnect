@@ -19,6 +19,7 @@ package ethblocklistener
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
@@ -28,6 +29,7 @@ import (
 	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFetchBlockReceiptsAsyncOptimizedOk(t *testing.T) {
@@ -214,7 +216,7 @@ func TestGetTransactionReceiptUsesCache(t *testing.T) {
 		BlockHash:       generateTestHash(1977),
 	}
 
-	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{cachedReceipt}, bl.getReceiptCacheGeneration())
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{cachedReceipt}, bl.getReceiptCacheGeneration(), cachedReceipt.BlockHash)
 
 	receipt, err := bl.GetTransactionReceipt(context.Background(), txHash)
 	assert.NoError(t, err)
@@ -229,7 +231,7 @@ func TestResetReceiptCacheClearsCachedReceipts(t *testing.T) {
 	txHash := "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6"
 	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
 		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash)},
-	}, bl.getReceiptCacheGeneration())
+	}, bl.getReceiptCacheGeneration(), nil)
 
 	_, ok := bl.getCachedTransactionReceipt(txHash)
 	assert.True(t, ok)
@@ -250,7 +252,7 @@ func TestStoreReceiptsInCacheIgnoresStaleGeneration(t *testing.T) {
 	txHash := "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6"
 	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
 		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash)},
-	}, gen)
+	}, gen, nil)
 
 	_, ok := bl.getCachedTransactionReceipt(txHash)
 	assert.False(t, ok)
@@ -268,7 +270,7 @@ func TestReconcileConfirmationsForTransactionUsesCachedReceipt(t *testing.T) {
 			BlockNumber:     ethtypes.HexUint64(1977),
 			BlockHash:       generateTestHash(1977),
 		},
-	}, bl.getReceiptCacheGeneration())
+	}, bl.getReceiptCacheGeneration(), generateTestHash(1977))
 
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", "0x7b9", false).Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
@@ -300,13 +302,13 @@ func TestReceiptCacheEvictsWhenFull(t *testing.T) {
 
 	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
 		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash1)},
-	}, gen)
+	}, gen, nil)
 	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
 		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash2)},
-	}, gen)
+	}, gen, nil)
 	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
 		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash3)},
-	}, gen)
+	}, gen, nil)
 
 	_, ok := bl.getCachedTransactionReceipt(txHash1)
 	assert.False(t, ok)
@@ -314,4 +316,218 @@ func TestReceiptCacheEvictsWhenFull(t *testing.T) {
 	assert.True(t, ok)
 	_, ok = bl.getCachedTransactionReceipt(txHash3)
 	assert.True(t, ok)
+}
+
+func TestInvalidateReceiptsForForkTrimRemovesOnlyTrimmedBlocks(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
+	defer done()
+
+	gen := bl.getReceiptCacheGeneration()
+	txHash100 := "0x1000000000000000000000000000000000000000000000000000000000000001"
+	txHash101 := "0x1010000000000000000000000000000000000000000000000000000000000001"
+	txHash102 := "0x1020000000000000000000000000000000000000000000000000000000000001"
+	blockHash100 := generateTestHash(100)
+	blockHash101 := generateTestHash(101)
+	blockHash102 := generateTestHash(102)
+
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash100),
+		BlockHash:       blockHash100,
+	}}, gen, blockHash100)
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash101),
+		BlockHash:       blockHash101,
+	}}, gen, blockHash101)
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash102),
+		BlockHash:       blockHash102,
+	}}, gen, blockHash102)
+
+	bl.invalidateReceiptsForForkTrim([]*ethrpc.BlockInfoJSONRPC{
+		{Hash: blockHash101, Number: 101, Transactions: []ethtypes.HexBytes0xPrefix{ethtypes.MustNewHexBytes0xPrefix(txHash101)}},
+		{Hash: blockHash102, Number: 102, Transactions: []ethtypes.HexBytes0xPrefix{ethtypes.MustNewHexBytes0xPrefix(txHash102)}},
+	})
+
+	_, ok := bl.getCachedTransactionReceipt(txHash100)
+	assert.True(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(txHash101)
+	assert.False(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(txHash102)
+	assert.False(t, ok)
+	assert.Equal(t, gen, bl.getReceiptCacheGeneration())
+}
+
+func TestInvalidateReceiptsForForkTrimFallsBackToResetAtBound(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
+	defer done()
+
+	gen := bl.getReceiptCacheGeneration()
+	txHash := "0x1000000000000000000000000000000000000000000000000000000000000001"
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash),
+	}}, gen, nil)
+
+	trimmed := make([]*ethrpc.BlockInfoJSONRPC, bl.MonitoredHeadLength+1)
+	for i := range trimmed {
+		trimmed[i] = &ethrpc.BlockInfoJSONRPC{Hash: generateTestHash(uint64(i)), Number: ethtypes.HexUint64(i)}
+	}
+	bl.invalidateReceiptsForForkTrim(trimmed)
+
+	// The whole cache is reset rather than tracking an unbounded invalidation set
+	assert.Equal(t, gen+1, bl.getReceiptCacheGeneration())
+	assert.Empty(t, bl.invalidatedReceiptBlockHashes)
+	_, ok := bl.getCachedTransactionReceipt(txHash)
+	assert.False(t, ok)
+}
+
+func TestStoreReceiptsInCacheIgnoresInvalidatedForkTrimBlock(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
+	defer done()
+
+	blockHash := generateTestHash(102)
+	txHash := "0x1020000000000000000000000000000000000000000000000000000000000001"
+	bl.invalidateReceiptsForForkTrim([]*ethrpc.BlockInfoJSONRPC{
+		{Hash: blockHash, Number: 102},
+	})
+
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash),
+		BlockHash:       blockHash,
+	}}, bl.getReceiptCacheGeneration(), blockHash)
+
+	_, ok := bl.getCachedTransactionReceipt(txHash)
+	assert.False(t, ok)
+}
+
+func TestRevalidateReceiptBlockHashAllowsCachingAgain(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
+	defer done()
+
+	blockHash := generateTestHash(101)
+	txHash := "0x1010000000000000000000000000000000000000000000000000000000000001"
+	bl.invalidateReceiptsForForkTrim([]*ethrpc.BlockInfoJSONRPC{
+		{
+			Hash:         blockHash,
+			Number:       101,
+			Transactions: []ethtypes.HexBytes0xPrefix{ethtypes.MustNewHexBytes0xPrefix(txHash)},
+		},
+	})
+
+	bl.revalidateReceiptBlockHash(blockHash)
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash),
+		BlockHash:       blockHash,
+	}}, bl.getReceiptCacheGeneration(), blockHash)
+
+	_, ok := bl.getCachedTransactionReceipt(txHash)
+	assert.True(t, ok)
+}
+
+func TestQueuedReceiptFetchRevalidatesPreviouslyInvalidatedBlock(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc) {
+		conf.UseGetBlockReceipts = true
+	})
+	defer done()
+
+	blockHash := generateTestHash(101)
+	txHash := "0x1010000000000000000000000000000000000000000000000000000000000001"
+	bl.invalidateReceiptsForForkTrim([]*ethrpc.BlockInfoJSONRPC{
+		{
+			Hash:         blockHash,
+			Number:       101,
+			Transactions: []ethtypes.HexBytes0xPrefix{ethtypes.MustNewHexBytes0xPrefix(txHash)},
+		},
+	})
+
+	receipt := &ethrpc.TxReceiptJSONRPC{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash),
+		BlockHash:       blockHash,
+	}
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockReceipts", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]*ethrpc.TxReceiptJSONRPC) = []*ethrpc.TxReceiptJSONRPC{receipt}
+	})
+
+	bl.canonicalChainLock.Lock()
+	bl.queueReceiptFetch(&ethrpc.BlockInfoJSONRPC{
+		Number: 101,
+		Hash:   blockHash,
+	})
+	pending := bl.pendingReceiptFetches
+	bl.pendingReceiptFetches = nil
+	bl.canonicalChainLock.Unlock()
+	bl.dispatchPendingReceiptFetches(pending)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := bl.getCachedTransactionReceipt(txHash); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_, ok := bl.getCachedTransactionReceipt(txHash)
+	assert.True(t, ok)
+}
+
+func TestHandleNewBlockForkTrimPreservesPrefixReceiptCache(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc) {
+		conf.UseGetBlockReceipts = true
+	})
+	defer done()
+
+	bl.canonicalChain = createTestChain(100, 102)
+	gen := bl.getReceiptCacheGeneration()
+	txHash100 := "0x1000000000000000000000000000000000000000000000000000000000000001"
+	txHash101 := "0x1010000000000000000000000000000000000000000000000000000000000001"
+	txHash102 := "0x1020000000000000000000000000000000000000000000000000000000000001"
+	blockHash100 := generateTestHash(100)
+	blockHash101 := generateTestHash(101)
+	blockHash102 := generateTestHash(102)
+
+	for pos := bl.canonicalChain.Front(); pos != nil; pos = pos.Next() {
+		bi := pos.Value.(*ethrpc.BlockInfoJSONRPC)
+		switch bi.Number.Uint64() {
+		case 100:
+			bi.Transactions = []ethtypes.HexBytes0xPrefix{ethtypes.MustNewHexBytes0xPrefix(txHash100)}
+		case 101:
+			bi.Transactions = []ethtypes.HexBytes0xPrefix{ethtypes.MustNewHexBytes0xPrefix(txHash101)}
+		case 102:
+			bi.Transactions = []ethtypes.HexBytes0xPrefix{ethtypes.MustNewHexBytes0xPrefix(txHash102)}
+		}
+	}
+
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash100),
+		BlockHash:       blockHash100,
+	}}, gen, blockHash100)
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash101),
+		BlockHash:       blockHash101,
+	}}, gen, blockHash101)
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{{
+		TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash102),
+		BlockHash:       blockHash102,
+	}}, gen, blockHash102)
+
+	forkBlock := &ethrpc.BlockInfoJSONRPC{
+		Number:     101,
+		Hash:       generateTestHash(101, 1),
+		ParentHash: blockHash100,
+	}
+
+	bl.canonicalChainLock.Lock()
+	bl.handleNewBlock(forkBlock, bl.canonicalChain.Front())
+	// The receipts of the new fork block are queued for fetching, not dispatched under the lock
+	require.Len(t, bl.pendingReceiptFetches, 1)
+	assert.Equal(t, forkBlock, bl.pendingReceiptFetches[0].blockInfo)
+	bl.pendingReceiptFetches = nil
+	bl.canonicalChainLock.Unlock()
+
+	_, ok := bl.getCachedTransactionReceipt(txHash100)
+	assert.True(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(txHash101)
+	assert.False(t, ok)
+	_, ok = bl.getCachedTransactionReceipt(txHash102)
+	assert.False(t, ok)
+	assert.Equal(t, gen, bl.getReceiptCacheGeneration())
 }
