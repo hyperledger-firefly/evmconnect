@@ -31,17 +31,15 @@ import (
 const (
 	metricsSubsystem = "blocklistener"
 
-	// metricTargetBlockHeight is the block height the node we are connected to reports via eth_blockNumber.
-	// If this is not what we expect for the chain, the node/URL we are talking to is unhealthy.
+	// metricTargetBlockHeight is the block height the endpoint we are connected to reports via eth_blockNumber.
 	metricTargetBlockHeight = "target_block_height"
 	// metricCanonicalBlockHeight is the height of the head of the canonical chain this listener is managing,
-	// built from the block filter / newHeads subscription. It should track the target height very closely -
-	// a sustained gap means the listener (or the filter behind it) is not keeping up.
+	// built from the block filter / newHeads subscription. It should track the target height very closely.
 	metricCanonicalBlockHeight = "canonical_block_height"
 )
 
 // InitMetrics registers the block height gauges against the supplied registry, and starts the poll loop
-// that emits them. Until this is called no metrics are emitted, and no polling is performed.
+// that emits them.
 func (bl *blockListener) InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error {
 	mm, err := registry.NewMetricsManagerForSubsystem(ctx, metricsSubsystem)
 	if err != nil {
@@ -74,9 +72,7 @@ func (bl *blockListener) setBlockHeightMetric(metricName string, blockHeight uin
 	mm.SetGaugeMetric(bl.ctx, metricName, float64(blockHeight), nil)
 }
 
-// metricsLoop samples the block heights on the block polling interval, independently of the listen loop.
-// Deliberately decoupled, so the target height keeps being reported while the listen loop is failing and
-// backing off - that is exactly when the gap between the two heights is the signal you want.
+// metricsLoop samples the block heights on the block polling interval. Decoupled from the listener loop.
 func (bl *blockListener) metricsLoop() {
 	defer close(bl.metricsLoopDone)
 

@@ -414,8 +414,7 @@ func (bl *blockListener) listenLoop() {
 				continue
 			}
 			// In light mode there is no canonical chain being built, so the head we dispatch to
-			// consumers is what we report as the canonical height (the metrics loop separately
-			// reports the target height)
+			// consumers is what we report as the canonical height
 			if head == bl.currentChainHead {
 				failCount = 0
 				continue
