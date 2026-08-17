@@ -108,8 +108,8 @@ func (bl *blockListener) emitChainStateMetrics() {
 		}
 	}
 
-	// The target height requires a query of the node
-	head, err := bl.refreshHighestBlockFromRPC()
+	// The target height requires a query of the node - a pure read, no listener state is updated
+	head, err := bl.queryBlockHeightFromRPC()
 	if err != nil {
 		// Purely a metrics query - the listen loop has its own error handling for the chain state
 		log.L(bl.ctx).Warnf("Failed to query target block height for metrics: %s", err)

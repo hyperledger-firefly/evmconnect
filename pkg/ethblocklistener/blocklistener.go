@@ -314,8 +314,8 @@ func (bl *blockListener) establishBlockHeightWithRetry() error {
 	})
 }
 
-// refreshHighestBlockFromRPC updates highestBlock from eth_blockNumber. Caller must not hold canonicalChainLock.
-func (bl *blockListener) refreshHighestBlockFromRPC() (uint64, error) {
+// queryBlockHeightFromRPC queries eth_blockNumber and returns the result, without updating any listener state.
+func (bl *blockListener) queryBlockHeightFromRPC() (uint64, error) {
 	var hexBlockHeight ethtypes.HexInteger
 	rpcErr := bl.backend.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
 	if rpcErr != nil {
@@ -407,7 +407,7 @@ func (bl *blockListener) listenLoop() {
 		}
 
 		if bl.ChainTrackingMode == ffcapi.ChainTrackingModeLight {
-			head, err := bl.refreshHighestBlockFromRPC()
+			head, err := bl.queryBlockHeightFromRPC()
 			if err != nil {
 				log.L(bl.ctx).Errorf("Failed to refresh chain head: %s", err)
 				failCount++
