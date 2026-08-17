@@ -27,6 +27,7 @@ import (
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
 	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/metric"
 	"github.com/hyperledger-firefly/common/pkg/retry"
 	"github.com/hyperledger-firefly/common/pkg/wsclient"
 	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
@@ -89,6 +90,7 @@ type BlockListener interface {
 	WaitClosed()
 	GetBackend() rpcbackend.RPC
 	UTSetBackend(rpcbackend.RPC)
+	InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error
 }
 
 func toMinimalBlockInfoList(blocks []*ethrpc.BlockInfoJSONRPC) []*ethrpc.MinimalBlockInfo {
@@ -142,6 +144,11 @@ type blockListener struct {
 
 	// headBlockNumber mode: last head value sent on the block listener channel (only written from listenLoop)
 	currentChainHead uint64
+
+	// metrics are optional - only emitted once InitMetrics has been called
+	metricsLock     sync.RWMutex
+	metrics         metric.MetricsManager
+	metricsLoopDone chan struct{}
 }
 
 func NewBlockListener(ctx context.Context, retry *retry.Retry, conf *BlockListenerConfig, httpConf *ffresty.Config, wsConf *wsclient.WSConfig) (bl BlockListener, err error) {
@@ -406,11 +413,15 @@ func (bl *blockListener) listenLoop() {
 				failCount++
 				continue
 			}
+			// In light mode there is no canonical chain being built, so the head we dispatch to
+			// consumers is what we report as the canonical height (the metrics loop separately
+			// reports the target height)
 			if head == bl.currentChainHead {
 				failCount = 0
 				continue
 			}
 			bl.currentChainHead = head
+			bl.setBlockHeightMetric(metricCanonicalBlockHeight, bl.currentChainHead)
 			update := &ffcapi.BlockHashEvent{GapPotential: false, Created: fftypes.Now(), HeadBlockNumber: bl.currentChainHead}
 			bl.consumerMux.Lock()
 			consumers := make([]*BlockUpdateConsumer, 0, len(bl.consumers))
@@ -823,6 +834,15 @@ func (bl *blockListener) WaitClosed() {
 	if listenLoopDone != nil {
 		select {
 		case <-listenLoopDone:
+		case <-bl.ctx.Done():
+		}
+	}
+	bl.metricsLock.RLock()
+	metricsLoopDone := bl.metricsLoopDone
+	bl.metricsLock.RUnlock()
+	if metricsLoopDone != nil {
+		select {
+		case <-metricsLoopDone:
 		case <-bl.ctx.Done():
 		}
 	}

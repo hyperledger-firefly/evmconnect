@@ -6,6 +6,7 @@ import (
 	context "context"
 
 	fftypes "github.com/hyperledger-firefly/common/pkg/fftypes"
+	metric "github.com/hyperledger-firefly/common/pkg/metric"
 	ethblocklistener "github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
 	ethrpc "github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	ethtypes "github.com/hyperledger-firefly/signer/pkg/ethtypes"
@@ -319,6 +320,24 @@ func (_m *BlockListener) GetMonitoredHeadLength() int {
 		r0 = rf()
 	} else {
 		r0 = ret.Get(0).(int)
+	}
+
+	return r0
+}
+
+// InitMetrics provides a mock function with given fields: ctx, registry
+func (_m *BlockListener) InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error {
+	ret := _m.Called(ctx, registry)
+
+	if len(ret) == 0 {
+		panic("no return value specified for InitMetrics")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, metric.MetricsRegistry) error); ok {
+		r0 = rf(ctx, registry)
+	} else {
+		r0 = ret.Error(0)
 	}
 
 	return r0
