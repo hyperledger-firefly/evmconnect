@@ -146,9 +146,8 @@ type blockListener struct {
 	currentChainHead uint64
 
 	// metrics are optional - only emitted once InitMetrics has been called
-	metricsLock     sync.RWMutex
-	metrics         metric.MetricsManager
-	metricsLoopDone chan struct{}
+	metricsLock sync.RWMutex
+	metrics     metric.MetricsManager
 }
 
 func NewBlockListener(ctx context.Context, retry *retry.Retry, conf *BlockListenerConfig, httpConf *ffresty.Config, wsConf *wsclient.WSConfig) (bl BlockListener, err error) {
@@ -302,26 +301,29 @@ func (bl *blockListener) establishBlockHeightWithRetry() error {
 		}
 
 		// Now get the block height
-		var hexBlockHeight ethtypes.HexInteger
-		rpcErr := bl.backend.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
-		if rpcErr != nil {
-			log.L(bl.ctx).Warnf("Block height could not be obtained: %s", rpcErr.Message)
-			return true, rpcErr.Error()
+		head, err := bl.queryBlockHeightFromRPC()
+		if err != nil {
+			log.L(bl.ctx).Warnf("Block height could not be obtained: %s", err)
+			return true, err
 		}
 
-		bl.setHighestBlock(hexBlockHeight.BigInt().Uint64())
+		bl.setHighestBlock(head)
 		return false, nil
 	})
 }
 
-// queryBlockHeightFromRPC queries eth_blockNumber and returns the result, without updating any listener state.
+// queryBlockHeightFromRPC queries eth_blockNumber and returns the result, without updating any listener
+// state. The height the node reports is recorded on the target block height gauge - the only source of
+// that metric, so it is always exactly what the node last told us.
 func (bl *blockListener) queryBlockHeightFromRPC() (uint64, error) {
 	var hexBlockHeight ethtypes.HexInteger
 	rpcErr := bl.backend.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
 	if rpcErr != nil {
+		bl.incPollFailureMetric("eth_blockNumber")
 		return 0, rpcErr.Error()
 	}
 	head := hexBlockHeight.BigInt().Uint64()
+	bl.setBlockHeightMetric(metricTargetBlockHeight, head)
 	return head, nil
 }
 
@@ -374,10 +376,19 @@ func (bl *blockListener) listenLoop() {
 			}
 		}
 
+		// In full chain tracking mode the loop below never queries the height the node reports, so refresh
+		// it here for the target metric. Done ahead of the filter calls, so that when they start failing -
+		// exactly when the gap between the node and the chain we have built matters - we can still see the
+		// chain moving on without us. No-ops (and makes no query) when metrics are not enabled.
+		if bl.ChainTrackingMode != ffcapi.ChainTrackingModeLight {
+			bl.refreshTargetBlockHeightMetric()
+		}
+
 		if filter == "" {
 			err := bl.backend.CallRPC(bl.ctx, &filter, "eth_newBlockFilter")
 			if err != nil {
 				log.L(bl.ctx).Errorf("Failed to establish new block filter: %s", err.Message)
+				bl.incPollFailureMetric("eth_newBlockFilter")
 				failCount++
 				continue
 			}
@@ -400,6 +411,7 @@ func (bl *blockListener) listenLoop() {
 					gapPotential = true
 				}
 				log.L(bl.ctx).Errorf("Failed to query block filter changes: %s", rpcErr.Message)
+				bl.incPollFailureMetric("eth_getFilterChanges")
 				failCount++
 				continue
 			}
@@ -789,9 +801,10 @@ func (bl *blockListener) GetHeadBlockNumber(_ context.Context) uint64 {
 
 func (bl *blockListener) setHighestBlock(block uint64) {
 	bl.canonicalChainLock.Lock()
-	defer bl.canonicalChainLock.Unlock()
 	bl.highestBlock = block
 	bl.highestBlockSet = true
+	bl.canonicalChainLock.Unlock()
+	bl.setBlockHeightMetric(metricCanonicalBlockHeight, block)
 }
 
 // checkAndSetHighestBlock records the chain head height and caches full block info for the head.
@@ -803,6 +816,10 @@ func (bl *blockListener) checkAndSetHighestBlock(bi *ethrpc.BlockInfoJSONRPC) {
 		bl.highestBlock = block
 		bl.highestBlockSet = true
 		bl.headBlockInfo = bi
+		// The gauge is bound to the same variable GetHighestBlock reports to event streams, so it is the
+		// head we are actually tracking rather than a separate sample of it. Just a gauge set, no I/O,
+		// so we accept doing it while we hold the write lock.
+		bl.setBlockHeightMetric(metricCanonicalBlockHeight, block)
 	} else if block == bl.highestBlock {
 		// Height already known from eth_blockNumber. Store the first full block at that height.
 		bl.headBlockInfo = bi
@@ -833,15 +850,6 @@ func (bl *blockListener) WaitClosed() {
 	if listenLoopDone != nil {
 		select {
 		case <-listenLoopDone:
-		case <-bl.ctx.Done():
-		}
-	}
-	bl.metricsLock.RLock()
-	metricsLoopDone := bl.metricsLoopDone
-	bl.metricsLock.RUnlock()
-	if metricsLoopDone != nil {
-		select {
-		case <-metricsLoopDone:
 		case <-bl.ctx.Done():
 		}
 	}

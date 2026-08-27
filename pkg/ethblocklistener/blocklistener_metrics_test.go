@@ -48,6 +48,25 @@ func readGaugeMetric(t *testing.T, registry metric.MetricsRegistry, metricName s
 	return 0, false
 }
 
+// readPollFailureMetric returns the current count of poll failures for the given JSON/RPC method
+func readPollFailureMetric(t *testing.T, registry metric.MetricsRegistry, method string) float64 {
+	mfs, err := registry.GetGatherer().Gather()
+	require.NoError(t, err)
+	fullName := "ff_" + metricsSubsystem + "_" + metricPollFailures
+	for _, mf := range mfs {
+		if mf.GetName() == fullName {
+			for _, m := range mf.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == metricLabelPollFailures && l.GetValue() == method {
+						return m.GetCounter().GetValue()
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
 func waitForGaugeMetric(t *testing.T, registry metric.MetricsRegistry, metricName string, expected float64) {
 	assert.Eventually(t, func() bool {
 		v, ok := readGaugeMetric(t, registry, metricName)
@@ -72,59 +91,50 @@ func TestBlockListenerMetricsInitFailDuplicateSubsystem(t *testing.T) {
 	err = bl.InitMetrics(context.Background(), registry)
 	assert.Regexp(t, "FF23074", err)
 	assert.Nil(t, bl.getMetrics())
-	assert.Nil(t, bl.metricsLoopDone) // no poll loop started
 }
 
 func TestBlockListenerMetricsNoopBeforeInit(t *testing.T) {
 	_, bl, _, done := newTestBlockListener(t)
 	defer done()
 
-	bl.canonicalChain.PushBack(&ethrpc.BlockInfoJSONRPC{
-		Number: ethtypes.HexUint64(1000),
-		Hash:   testBlockHashFor(1000),
-	})
-
-	// No metrics, and no eth_blockNumber call for the target height - the latter asserted by done()
+	// All emit points no-op, and the target height refresh makes no query at all - the latter
+	// asserted by done(), as no eth_blockNumber call is mocked
 	bl.setBlockHeightMetric(metricTargetBlockHeight, 1000)
-	bl.emitChainStateMetrics()
+	bl.incPollFailureMetric("eth_blockNumber")
+	bl.refreshTargetBlockHeightMetric()
 }
 
-func TestBlockListenerMetricsChainStateHeights(t *testing.T) {
-	_, bl, mRPC, done := newTestBlockListener(t)
+func TestBlockListenerMetricsTrackedHeightFromListenerState(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
 	defer done()
 
 	registry := initTestMetrics(t, bl)
-	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
-		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(1005)
-	})
 
-	// The target height is reported before any block has been indexed
-	bl.emitChainStateMetrics()
+	// Nothing is reported until we have a height
 	_, ok := readGaugeMetric(t, registry, metricCanonicalBlockHeight)
 	assert.False(t, ok)
-	v, ok := readGaugeMetric(t, registry, metricTargetBlockHeight)
-	assert.True(t, ok)
-	assert.Equal(t, float64(1005), v)
 
-	// Once blocks are indexed the canonical height is reported too
-	bl.canonicalChain.PushBack(&ethrpc.BlockInfoJSONRPC{
-		Number: ethtypes.HexUint64(1000),
-		Hash:   testBlockHashFor(1000),
-	})
-	bl.canonicalChain.PushBack(&ethrpc.BlockInfoJSONRPC{
+	// The initial height established at startup from eth_blockNumber
+	bl.setHighestBlock(1000)
+	v, ok := readGaugeMetric(t, registry, metricCanonicalBlockHeight)
+	assert.True(t, ok)
+	assert.Equal(t, float64(1000), v)
+
+	// Then each block we index that advances the head we are tracking
+	bl.checkAndSetHighestBlock(&ethrpc.BlockInfoJSONRPC{
 		Number: ethtypes.HexUint64(1001),
 		Hash:   testBlockHashFor(1001),
 	})
-	bl.emitChainStateMetrics()
-	v, ok = readGaugeMetric(t, registry, metricCanonicalBlockHeight)
-	assert.True(t, ok)
+	v, _ = readGaugeMetric(t, registry, metricCanonicalBlockHeight)
 	assert.Equal(t, float64(1001), v)
 
-	// The canonical height follows the chain back down when a re-org trims the head
-	_ = bl.canonicalChain.Remove(bl.canonicalChain.Back())
-	bl.emitChainStateMetrics()
+	// Blocks at or below the head we already have don't move it
+	bl.checkAndSetHighestBlock(&ethrpc.BlockInfoJSONRPC{
+		Number: ethtypes.HexUint64(999),
+		Hash:   testBlockHashFor(999),
+	})
 	v, _ = readGaugeMetric(t, registry, metricCanonicalBlockHeight)
-	assert.Equal(t, float64(1000), v)
+	assert.Equal(t, float64(1001), v)
 }
 
 func TestBlockListenerMetricsTargetBlockHeightQueryFail(t *testing.T) {
@@ -134,30 +144,12 @@ func TestBlockListenerMetricsTargetBlockHeightQueryFail(t *testing.T) {
 	registry := initTestMetrics(t, bl)
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(&rpcbackend.RPCError{Message: "pop"})
 
-	// No retry, and nothing reported - the listen loop drives the chain state error handling
-	bl.emitChainStateMetrics()
+	// No retry, and no height reported - just the failure counted, so a node that is failing to answer
+	// is distinguishable from one reporting a height that isn't moving
+	bl.refreshTargetBlockHeightMetric()
 	_, ok := readGaugeMetric(t, registry, metricTargetBlockHeight)
 	assert.False(t, ok)
-}
-
-func TestBlockListenerMetricsLoopWaitsForInitialBlockHeight(t *testing.T) {
-	_, bl, _, done := newTestBlockListener(t)
-	defer done()
-
-	// The listen loop is never started, so the metrics loop must make no query at all (asserted by done())
-	initTestMetrics(t, bl)
-	time.Sleep(shortDelay)
-	require.NotNil(t, bl.metricsLoopDone)
-}
-
-func TestBlockListenerMetricsInitTwiceStartsOneLoop(t *testing.T) {
-	_, bl, _, done := newTestBlockListener(t)
-	defer done()
-
-	initTestMetrics(t, bl)
-	loopDone := bl.metricsLoopDone
-	initTestMetrics(t, bl) // separate registry, so registration succeeds again
-	assert.Equal(t, loopDone, bl.metricsLoopDone)
+	assert.Equal(t, float64(1), readPollFailureMetric(t, registry, "eth_blockNumber"))
 }
 
 func TestBlockListenerMetricsFullMode(t *testing.T) {
@@ -187,9 +179,34 @@ func TestBlockListenerMetricsFullMode(t *testing.T) {
 		Updates: updates,
 	})
 
-	// The height the node reports, and the height of the chain we've built from the filter
+	// The height the node reports, refreshed by the listen loop, and the head of the chain we've built
 	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 1001)
 	waitForGaugeMetric(t, registry, metricCanonicalBlockHeight, 1001)
+}
+
+func TestBlockListenerMetricsFullModeFilterFail(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
+		conf.BlockPollingInterval = 1 * time.Millisecond
+
+		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
+			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(1001)
+		})
+		mockSeedBlockNotFound(mRPC, 1001-uint64(conf.MonitoredHeadLength)+1)
+		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(&rpcbackend.RPCError{Message: "pop"})
+	})
+	defer done()
+
+	registry := initTestMetrics(t, bl)
+
+	// Start the loop directly - the filter never establishes, so the listener never marks itself started
+	bl.checkAndStartListenerLoop()
+
+	// The target height is refreshed ahead of the filter calls, so we can still see the chain moving on
+	// while the filter is broken - and the failures are counted
+	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 1001)
+	assert.Eventually(t, func() bool {
+		return readPollFailureMetric(t, registry, "eth_newBlockFilter") > 0
+	}, 5*time.Second, time.Millisecond)
 }
 
 func TestBlockListenerMetricsLightMode(t *testing.T) {
@@ -214,7 +231,7 @@ func TestBlockListenerMetricsLightMode(t *testing.T) {
 		Updates: updates,
 	})
 
-	// In light mode there is no canonical chain, so the head we dispatch is the canonical height
+	// In light mode there is no canonical chain, so the head we dispatch is the height we track
 	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 2000)
 	waitForGaugeMetric(t, registry, metricCanonicalBlockHeight, 2000)
 }

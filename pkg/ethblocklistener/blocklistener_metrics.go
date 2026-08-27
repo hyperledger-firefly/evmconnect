@@ -18,43 +18,44 @@ package ethblocklistener
 
 import (
 	"context"
-	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/i18n"
 	"github.com/hyperledger-firefly/common/pkg/log"
 	"github.com/hyperledger-firefly/common/pkg/metric"
 	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
-	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
-	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 const (
 	metricsSubsystem = "blocklistener"
 
 	// metricTargetBlockHeight is the block height the endpoint we are connected to reports via eth_blockNumber.
+	// Emitted from queryBlockHeightFromRPC, so it is always the value we last received from the node.
 	metricTargetBlockHeight = "target_block_height"
-	// metricCanonicalBlockHeight is the height of the head of the canonical chain this listener is managing,
-	// built from the block filter / newHeads subscription. It should track the target height very closely.
+	// metricCanonicalBlockHeight is the head of the chain this listener is tracking - in full chain tracking
+	// mode the head of the in-memory canonical chain built from the block filter / newHeads subscription,
+	// and in light mode the head we dispatch to consumers. It should track the target height very closely.
 	metricCanonicalBlockHeight = "canonical_block_height"
+	// metricPollFailures counts the JSON/RPC polls the listen loop makes that failed, labelled by method,
+	// so a node/endpoint that is failing to answer is distinguishable from one that is answering with a
+	// height that is not moving.
+	metricPollFailures      = "poll_failures_total"
+	metricLabelPollFailures = "method"
 )
 
-// InitMetrics registers the block height gauges against the supplied registry, and starts the poll loop
-// that emits them.
+// InitMetrics registers the block listener metrics against the supplied registry. The metrics are emitted
+// inline from the listener logic that maintains the block heights - no separate poll loop is started.
 func (bl *blockListener) InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error {
 	mm, err := registry.NewMetricsManagerForSubsystem(ctx, metricsSubsystem)
 	if err != nil {
 		return i18n.WrapError(ctx, err, msgs.MsgMetricsInitFail, metricsSubsystem)
 	}
 	mm.NewGaugeMetric(ctx, metricTargetBlockHeight, "The block height reported by the connected node via eth_blockNumber", false)
-	mm.NewGaugeMetric(ctx, metricCanonicalBlockHeight, "The block height of the head of the canonical chain tracked by the block listener", false)
+	mm.NewGaugeMetric(ctx, metricCanonicalBlockHeight, "The block height of the head of the chain tracked by the block listener", false)
+	mm.NewCounterMetricWithLabels(ctx, metricPollFailures, "The number of block listener JSON/RPC polls that have failed, by method", []string{metricLabelPollFailures}, false)
 
 	bl.metricsLock.Lock()
 	defer bl.metricsLock.Unlock()
 	bl.metrics = mm
-	if bl.metricsLoopDone == nil {
-		bl.metricsLoopDone = make(chan struct{})
-		go bl.metricsLoop()
-	}
 	return nil
 }
 
@@ -72,60 +73,25 @@ func (bl *blockListener) setBlockHeightMetric(metricName string, blockHeight uin
 	mm.SetGaugeMetric(bl.ctx, metricName, float64(blockHeight), nil)
 }
 
-// metricsLoop samples the block heights on the block polling interval. Decoupled from the listener loop.
-func (bl *blockListener) metricsLoop() {
-	defer close(bl.metricsLoopDone)
-
-	// Wait for the listen loop to establish the initial block height before making any query of our own.
-	// As well as avoiding driving JSON/RPC traffic before the listener is running, this ensures the
-	// WebSocket backend (when configured) has been switched in before we read bl.backend.
-	select {
-	case <-bl.initialBlockHeightObtained:
-	case <-bl.ctx.Done():
+func (bl *blockListener) incPollFailureMetric(method string) {
+	mm := bl.getMetrics()
+	if mm == nil {
 		return
 	}
-
-	for {
-		bl.emitChainStateMetrics()
-		select {
-		case <-bl.ctx.Done():
-			return
-		case <-time.After(bl.BlockPollingInterval):
-		}
-	}
+	mm.IncCounterMetricWithLabels(bl.ctx, metricPollFailures, map[string]string{metricLabelPollFailures: method}, nil)
 }
 
-func (bl *blockListener) emitChainStateMetrics() {
+// refreshTargetBlockHeightMetric queries the node for the height it reports, purely so the target gauge
+// stays current. Only needed in full chain tracking mode - light mode already queries eth_blockNumber on
+// every iteration to track the head, and in full mode we would otherwise never call it again after startup,
+// leaving no way to see the chain moving on while our filter has gone quiet.
+func (bl *blockListener) refreshTargetBlockHeightMetric() {
 	if bl.getMetrics() == nil {
 		return // never drive any query of the node when metrics are not enabled
 	}
-
-	// The canonical head is free to read - note in light chain tracking mode there is no canonical chain,
-	// so the listen loop emits the head it dispatches to consumers instead
-	if bl.ChainTrackingMode != ffcapi.ChainTrackingModeLight {
-		if canonicalHeight, ok := bl.getCanonicalBlockHeight(); ok {
-			bl.setBlockHeightMetric(metricCanonicalBlockHeight, canonicalHeight)
-		}
+	if _, err := bl.queryBlockHeightFromRPC(); err != nil {
+		// Diagnostic only - the failure is recorded on the query failure counter, and the listen loop
+		// has its own error handling for the chain state
+		log.L(bl.ctx).Warnf("Failed to refresh target block height: %s", err)
 	}
-
-	// The target height requires a query of the node - a pure read, no listener state is updated
-	head, err := bl.queryBlockHeightFromRPC()
-	if err != nil {
-		// Purely a metrics query - the listen loop has its own error handling for the chain state
-		log.L(bl.ctx).Warnf("Failed to query target block height for metrics: %s", err)
-		return
-	}
-	bl.setBlockHeightMetric(metricTargetBlockHeight, head)
-}
-
-// getCanonicalBlockHeight returns the head of the in-memory canonical chain, with ok false until we
-// have indexed a block.
-func (bl *blockListener) getCanonicalBlockHeight() (uint64, bool) {
-	bl.canonicalChainLock.RLock()
-	defer bl.canonicalChainLock.RUnlock()
-	back := bl.canonicalChain.Back()
-	if back == nil || back.Value == nil {
-		return 0, false
-	}
-	return back.Value.(*ethrpc.BlockInfoJSONRPC).Number.Uint64(), true
 }
