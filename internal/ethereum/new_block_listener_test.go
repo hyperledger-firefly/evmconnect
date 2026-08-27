@@ -24,6 +24,7 @@ import (
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 const testBlockFilterID1 = "block_filter_1"
@@ -34,6 +35,8 @@ func TestNewBlockListenerOK(t *testing.T) {
 
 	ctx, c, mRPC, done := newTestConnector(t)
 	defer done()
+
+	require.Equal(t, ffcapi.ChainTrackingModeFull, c.GetChainTrackingMode(ctx))
 
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		hbh := args[1].(*ethtypes.HexInteger)

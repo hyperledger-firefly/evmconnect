@@ -87,6 +87,11 @@ func TestConnectorInit(t *testing.T) {
 	cc, err := NewEthereumConnector(context.Background(), conf)
 	assert.Regexp(t, "FF23025", err)
 
+	conf.Set(ChainTrackingMode, "wrong")
+	_, err = NewEthereumConnector(context.Background(), conf)
+	assert.Regexp(t, "FF23069.*wrong", err)
+
+	conf.Set(ChainTrackingMode, "")
 	conf.Set(ffresty.HTTPConfigURL, "http://localhost:8545")
 	conf.Set(WebSocketsEnabled, true)
 	conf.Set(EventsCatchupThreshold, 1)

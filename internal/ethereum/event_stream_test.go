@@ -19,6 +19,7 @@ package ethereum
 import (
 	"context"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func testEventStream(t *testing.T, listeners ...*ffcapi.EventListenerAddRequest) (*eventStream, chan *ffcapi.ListenerEvent, *rpcbackendmocks.Backend, func()) {
@@ -304,6 +306,124 @@ func TestCatchupThenRejoinLeadGroup(t *testing.T) {
 		}
 		break
 	}
+}
+
+func TestListenerNotAdoptedByLeadGroupBeforeStart(t *testing.T) {
+
+	// An initial listener at the head of the chain, so preStartProcessing establishes es.headBlock
+	// (with no initial listeners at all, headBlock is only established later by the stream loop)
+	l1req := &ffcapi.EventListenerAddRequest{
+		ListenerID: fftypes.NewUUID(),
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: "latest",
+		},
+	}
+
+	es, _, mRPC, done := testEventStream(t, l1req)
+	defer done()
+	assert.Equal(t, int64(testHighBlock), es.headBlock)
+
+	var callMux sync.Mutex
+	getLogsCalls := 0
+	firstPageDone := make(chan struct{})  // closed when the 2nd eth_getLogs call arrives - i.e. the 1st catchup page has been scanned, and the HWM moved
+	releaseCatchup := make(chan struct{}) // gates the 2nd eth_getLogs call, so we can assert the mid-catchup state deterministically
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		callMux.Lock()
+		thisCall := getLogsCalls + 1
+		getLogsCalls = thisCall
+		callMux.Unlock()
+		if thisCall == 2 {
+			close(firstPageDone)
+			<-releaseCatchup
+		}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	}).Maybe()
+
+	es.mux.Lock()
+	updateCountBeforeAdd := es.updateCount
+	es.mux.Unlock()
+
+	// Add (but do not yet start) a listener far behind the head of the chain
+	l, err := es.addEventListener(es.ctx, &ffcapi.EventListenerAddRequest{
+		StreamID:   es.id,
+		ListenerID: fftypes.NewUUID(),
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: "1000",
+		},
+	})
+	assert.NoError(t, err)
+
+	// The listener must be published in catchup mode, without prodding the lead group to rebuild,
+	// so there is no window where the lead group can adopt it and move its HWM to the head of the chain
+	es.mux.Lock()
+	assert.True(t, l.catchup)
+	assert.Equal(t, updateCountBeforeAdd, es.updateCount)
+	es.mux.Unlock()
+	leadGroupContains := func(ag *aggregatedListener, target *listener) bool {
+		for _, member := range ag.listeners {
+			if member == target {
+				return true
+			}
+		}
+		return false
+	}
+	lastUpdate := -1
+	var ag *aggregatedListener
+	es.buildReuseLeadGroupListener(&lastUpdate, &ag)
+	assert.False(t, leadGroupContains(ag, l))
+	l.hwmMux.Lock()
+	assert.Equal(t, int64(1000), l.hwmBlock) // the HWM must still be the configured fromBlock
+	l.hwmMux.Unlock()
+
+	// Start it - as it is far behind the head it must enter a catchup loop, not join the lead group
+	es.startEventListener(l)
+	<-firstPageDone // a catchup iteration has executed (fromBlock=1000), and the loop is now gated before page 2
+
+	es.mux.Lock()
+	assert.True(t, l.catchup)
+	updateCountMidCatchup := es.updateCount
+	catchupLoopDone := l.catchupLoopDone
+	es.mux.Unlock()
+	require.NotNil(t, catchupLoopDone)
+
+	// The HWM must reflect the scanned range (one page on from the configured fromBlock) - not the head of the chain
+	l.hwmMux.Lock()
+	assert.Equal(t, int64(1000)+es.c.catchupPageSize, l.hwmBlock)
+	l.hwmMux.Unlock()
+
+	// Still not adopted by the lead group mid-catchup
+	lastUpdate = -1
+	es.buildReuseLeadGroupListener(&lastUpdate, &ag)
+	assert.False(t, leadGroupContains(ag, l))
+
+	// startEventListener must be idempotent - a second call (as happens for initial listeners, which are
+	// started by both the stream loop and preStartProcessing in some paths) must not spawn a second
+	// catchup loop, or prod the lead group to rebuild
+	es.startEventListener(l)
+	es.mux.Lock()
+	assert.Equal(t, updateCountMidCatchup, es.updateCount)
+	assert.True(t, catchupLoopDone == l.catchupLoopDone)
+	es.mux.Unlock()
+
+	// Release the catchup loop and let it scan to the head of the chain - it must then rejoin the lead group
+	close(releaseCatchup)
+	<-catchupLoopDone
+
+	es.mux.Lock()
+	assert.False(t, l.catchup)
+	assert.NotEqual(t, updateCountMidCatchup, es.updateCount)
+	es.mux.Unlock()
+	lastUpdate = -1
+	es.buildReuseLeadGroupListener(&lastUpdate, &ag)
+	assert.True(t, leadGroupContains(ag, l))
 }
 
 func TestLeadGroupSteadyStateFallbackToCatchup(t *testing.T) {
