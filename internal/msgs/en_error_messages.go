@@ -91,4 +91,5 @@ var (
 	MsgTransactionEstimateTooLargeForBlock      = ffe("FF23071", "Gas estimate %s (scaled at %.2f from estimate %s) too large for the current block gas limit %s")
 	MsgMonitoredHeadLengthInvalid               = ffe("FF23072", "Monitored head length must be greater than or equal to 1 value=%d")
 	MsgUnknownJSONFormatOptionValue             = ffe("FF23073", "Unknown value '%s' for JSON formatting option '%s'. Supported values: %s")
+	MsgMetricsInitFail                          = ffe("FF23074", "Failed to initialize metrics for subsystem '%s'")
 )

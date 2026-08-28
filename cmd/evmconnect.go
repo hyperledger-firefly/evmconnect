@@ -110,6 +110,11 @@ func run() error {
 		return err
 	}
 
+	// Emit the block listener metrics into the metrics registry of the manager
+	if err := c.BlockListener().InitMetrics(ctx, m.MetricsRegistry()); err != nil {
+		return err
+	}
+
 	// Setup signal handling to cancel the context, which shuts down the API Server
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
