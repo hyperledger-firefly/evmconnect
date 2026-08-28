@@ -44,6 +44,8 @@ func testEventStreamExistingConnector(t *testing.T, ctx context.Context, done fu
 	events := make(chan *ffcapi.ListenerEvent)
 	esID := fftypes.NewUUID()
 	c.chainID = "12345" // set chainID before streamLoop starts, so enrich does not call net_version
+	c.eventFilterPollingInterval = 1 * time.Millisecond
+	c.retry.MaximumDelay = 1 * time.Microsecond
 	_, _, err := c.EventStreamStart(ctx, &ffcapi.EventStreamStartRequest{
 		ID:               esID,
 		StreamContext:    ctx,
@@ -53,8 +55,6 @@ func testEventStreamExistingConnector(t *testing.T, ctx context.Context, done fu
 	})
 	assert.NoError(t, err)
 	es := c.eventStreams[*esID]
-	es.c.eventFilterPollingInterval = 1 * time.Millisecond
-	es.c.retry.MaximumDelay = 1 * time.Microsecond
 	assert.NotNil(t, es)
 
 	es.preStartProcessing()
@@ -194,7 +194,9 @@ func TestStartHeadBlockLimitedByChainHead(t *testing.T) {
 	es, _, _, done := testEventStream(t, l1req)
 	defer done()
 
-	assert.Equal(t, int64(testHighBlock), es.headBlock)
+	// The listener is way ahead of the chain, so the head position is the safe point behind the
+	// chain head - which is also where the steady state loop parks it, so this is stable
+	assert.Equal(t, int64(testHighBlock)-es.c.checkpointBlockGap, es.headBlock.Load())
 }
 
 func TestCatchupThenRejoinLeadGroup(t *testing.T) {
@@ -267,8 +269,11 @@ func TestCatchupThenRejoinLeadGroup(t *testing.T) {
 
 	_, _, err := es.c.EventListenerAdd(es.ctx, l2req)
 	assert.NoError(t, err)
+	es.mux.Lock()
 	l := es.listeners[*l2req.ListenerID]
-	assert.True(t, l.catchup)
+	inCatchup := l.catchup
+	es.mux.Unlock()
+	assert.True(t, inCatchup)
 
 	e := <-events
 	assert.Equal(t, fftypes.FFuint64(1024), e.Event.ID.BlockNumber)
@@ -287,7 +292,10 @@ func TestCatchupThenRejoinLeadGroup(t *testing.T) {
 	// Confirm the listener joins the group
 	started := time.Now()
 	for {
-		t.Logf("Catchup=%t HeadBlock=%d", l.catchup, es.headBlock)
+		es.mux.Lock()
+		inCatchup = l.catchup
+		es.mux.Unlock()
+		t.Logf("Catchup=%t HeadBlock=%d", inCatchup, es.headBlock.Load())
 		select {
 		case <-events:
 			t.Logf("Noting duplicate event detection of unconfirmed event after listener rejoined head group")
@@ -296,11 +304,11 @@ func TestCatchupThenRejoinLeadGroup(t *testing.T) {
 		if time.Since(started) > 1*time.Second {
 			assert.Fail(t, "Never exited catchup")
 		}
-		if l.catchup {
+		if inCatchup {
 			time.Sleep(1 * time.Millisecond)
 			continue
 		}
-		if es.headBlock != testHighBlock-es.c.checkpointBlockGap {
+		if es.headBlock.Load() != testHighBlock-es.c.checkpointBlockGap {
 			time.Sleep(1 * time.Millisecond)
 			continue
 		}
@@ -325,7 +333,9 @@ func TestListenerNotAdoptedByLeadGroupBeforeStart(t *testing.T) {
 
 	es, _, mRPC, done := testEventStream(t, l1req)
 	defer done()
-	assert.Equal(t, int64(testHighBlock), es.headBlock)
+	es.mux.Lock()
+	assert.GreaterOrEqual(t, es.headBlock.Load(), int64(testHighBlock)-es.c.checkpointBlockGap)
+	es.mux.Unlock()
 
 	var callMux sync.Mutex
 	getLogsCalls := 0
@@ -426,6 +436,203 @@ func TestListenerNotAdoptedByLeadGroupBeforeStart(t *testing.T) {
 	assert.True(t, leadGroupContains(ag, l))
 }
 
+func TestHeadBlockEstablishedWithNoInitialListeners(t *testing.T) {
+
+	es, _, _, done := testEventStream(t)
+	defer done()
+
+	// With no listeners the lead group loops never store a head position, so this is purely what
+	// preStartProcessing established - the safe point behind the chain head
+	assert.Equal(t, int64(testHighBlock)-es.c.checkpointBlockGap, es.headBlock.Load())
+}
+
+func TestListenerHeldInCatchupUntilHeadEstablished(t *testing.T) {
+
+	ctx, c, mRPC, done := newTestConnector(t)
+	mockStreamLoopEmpty(mRPC)
+	defer done()
+	c.eventFilterPollingInterval = 1 * time.Millisecond
+	c.retry.MaximumDelay = 1 * time.Microsecond
+
+	var callMux sync.Mutex
+	getLogsCalls := 0
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		callMux.Lock()
+		getLogsCalls++
+		callMux.Unlock()
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	}).Maybe()
+
+	es := &eventStream{
+		id:        fftypes.NewUUID(),
+		c:         c,
+		ctx:       ctx,
+		events:    make(chan<- *ffcapi.ListenerEvent),
+		listeners: make(map[fftypes.UUID]*listener),
+	}
+	es.headBlock.Store(-1) // the stream's head position is not yet established
+
+	// A listener at the head of the chain
+	l, err := es.addEventListener(es.ctx, &ffcapi.EventListenerAddRequest{
+		StreamID:   es.id,
+		ListenerID: fftypes.NewUUID(),
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: "latest",
+		},
+	})
+	assert.NoError(t, err)
+
+	es.startEventListener(l)
+
+	// It must be held in catchup (not adopted by the lead group against an unestablished head)
+	es.mux.Lock()
+	assert.True(t, l.catchup)
+	catchupLoopDone := l.catchupLoopDone
+	es.mux.Unlock()
+	require.NotNil(t, catchupLoopDone)
+
+	// While the head position is unestablished, the catchup loop cannot know where the lead group
+	// will land - so it must not scan at all, and must leave the HWM where it is
+	time.Sleep(50 * time.Millisecond) // many polling intervals
+	callMux.Lock()
+	assert.Zero(t, getLogsCalls)
+	callMux.Unlock()
+	assert.Equal(t, int64(testHighBlock), l.getHWMBlock())
+
+	// Once the head position is established, the listener joins the lead group rather than
+	// scanning past it
+	es.headBlock.Store(testHighBlock)
+	<-catchupLoopDone
+	es.mux.Lock()
+	assert.False(t, l.catchup)
+	es.mux.Unlock()
+	callMux.Lock()
+	assert.Zero(t, getLogsCalls)
+	callMux.Unlock()
+	assert.Equal(t, int64(testHighBlock), l.getHWMBlock()) // never advanced past the lead group
+}
+
+func TestListenerHeldInCatchupExitsWhenStreamStops(t *testing.T) {
+
+	ctx, c, mRPC, done := newTestConnector(t)
+	mockStreamLoopEmpty(mRPC)
+	defer done()
+	// Long polling interval, so the only way out of the catchup wait is the stream stopping
+	c.eventFilterPollingInterval = 1 * time.Hour
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	es := &eventStream{
+		id:        fftypes.NewUUID(),
+		c:         c,
+		ctx:       streamCtx,
+		events:    make(chan<- *ffcapi.ListenerEvent),
+		listeners: make(map[fftypes.UUID]*listener),
+	}
+	es.headBlock.Store(-1) // the stream's head position is never established
+
+	l, err := es.addEventListener(es.ctx, &ffcapi.EventListenerAddRequest{
+		StreamID:   es.id,
+		ListenerID: fftypes.NewUUID(),
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: "latest",
+		},
+	})
+	assert.NoError(t, err)
+
+	es.startEventListener(l)
+	es.mux.Lock()
+	catchupLoopDone := l.catchupLoopDone
+	es.mux.Unlock()
+	require.NotNil(t, catchupLoopDone)
+
+	// Parked waiting for the head position to be established - stopping the stream must exit it
+	cancelStream()
+	<-catchupLoopDone
+}
+
+func TestCatchupDoesNotOvershootLeadGroup(t *testing.T) {
+
+	ctx, c, mRPC, done := newTestConnector(t)
+	mockStreamLoopEmpty(mRPC)
+	defer done()
+	c.eventFilterPollingInterval = 1 * time.Millisecond
+	c.retry.MaximumDelay = 1 * time.Microsecond
+	// Deliberately configure a page size larger than the threshold - the normalization in
+	// NewEthereumConnector prevents this, but the catchup loop must not rely on that to avoid
+	// paging past the lead group
+	c.catchupThreshold = 10
+	c.catchupPageSize = 100
+
+	// The lead group is parked at the safe point behind the chain head
+	headBlock := int64(testHighBlock) - c.checkpointBlockGap
+
+	var callMux sync.Mutex
+	var maxToBlock int64 = -1
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		toBlock := args[3].(*ethrpc.LogFilterJSONRPC).ToBlock.BigInt().Int64()
+		callMux.Lock()
+		if toBlock > maxToBlock {
+			maxToBlock = toBlock
+		}
+		callMux.Unlock()
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	}).Maybe()
+
+	es := &eventStream{
+		id:        fftypes.NewUUID(),
+		c:         c,
+		ctx:       ctx,
+		events:    make(chan<- *ffcapi.ListenerEvent),
+		listeners: make(map[fftypes.UUID]*listener),
+	}
+	es.headBlock.Store(headBlock)
+
+	// A listener half a page behind the lead group - so a full unclamped page would take its HWM
+	// past the lead group, into the re-org unstable blocks the lead group is deliberately behind
+	l, err := es.addEventListener(es.ctx, &ffcapi.EventListenerAddRequest{
+		StreamID:   es.id,
+		ListenerID: fftypes.NewUUID(),
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: strconv.FormatInt(headBlock-50, 10),
+		},
+	})
+	assert.NoError(t, err)
+
+	// The gap (50) is above the threshold (10), so it starts in individual catchup
+	es.startEventListener(l)
+	es.mux.Lock()
+	assert.True(t, l.catchup)
+	catchupLoopDone := l.catchupLoopDone
+	es.mux.Unlock()
+	require.NotNil(t, catchupLoopDone)
+
+	// It catches up to the lead group and joins it, rather than scanning past it
+	<-catchupLoopDone
+	es.mux.Lock()
+	assert.False(t, l.catchup)
+	es.mux.Unlock()
+	assert.Equal(t, headBlock, l.getHWMBlock())
+
+	// No query ever reached the lead group's block, so the HWM could never advance past it
+	callMux.Lock()
+	assert.Equal(t, headBlock-1, maxToBlock)
+	callMux.Unlock()
+}
+
 func TestLeadGroupSteadyStateFallbackToCatchup(t *testing.T) {
 
 	ctx, c, mRPC, done := newTestConnector(t)
@@ -433,11 +640,10 @@ func TestLeadGroupSteadyStateFallbackToCatchup(t *testing.T) {
 	defer done()
 
 	es := &eventStream{
-		id:        fftypes.NewUUID(),
-		c:         c,
-		ctx:       ctx,
-		events:    make(chan<- *ffcapi.ListenerEvent),
-		headBlock: -1,
+		id:     fftypes.NewUUID(),
+		c:      c,
+		ctx:    ctx,
+		events: make(chan<- *ffcapi.ListenerEvent),
 		listeners: map[fftypes.UUID]*listener{
 			*fftypes.NewUUID(): {
 				id: fftypes.NewUUID(),
@@ -450,6 +656,7 @@ func TestLeadGroupSteadyStateFallbackToCatchup(t *testing.T) {
 		},
 		streamLoopDone: make(chan struct{}),
 	}
+	es.headBlock.Store(-1)
 
 	endedDueToExit := es.leadGroupSteadyState()
 	assert.False(t, endedDueToExit)

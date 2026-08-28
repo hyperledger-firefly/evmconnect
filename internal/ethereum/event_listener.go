@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
@@ -120,11 +121,11 @@ func (l *listener) ensureHWM(ctx context.Context) error {
 func (l *listener) checkReadyForLeadPackOrRemoved(ctx context.Context) (bool, bool) {
 	l.hwmMux.Lock()
 	defer l.hwmMux.Unlock()
-	// We do a dirty read of the head block (unless the caller has locked the eventStream Mutex, which
-	// we support in the mutex hierarchy)
-	headBlock := l.es.headBlock
+	// The head block is atomic, as we cannot take the eventStream lock here (our caller may or
+	// may not already hold it in the mutex hierarchy)
+	headBlock := l.es.headBlock.Load()
 	blockGap := headBlock - l.hwmBlock
-	readyForLead := blockGap < l.c.catchupThreshold
+	readyForLead := headBlock >= 0 && blockGap < l.c.catchupThreshold
 	log.L(ctx).Debugf("Listener %s head=%d hwm=%d (gap=%d) readyForLead=%t", l.id, headBlock, l.hwmBlock, blockGap, readyForLead)
 	return readyForLead, l.removed
 }
@@ -151,6 +152,12 @@ func (l *listener) moveHWMForwards(hwmBlock int64) {
 	if hwmBlock > l.hwmBlock {
 		l.hwmBlock = hwmBlock // check against moving backwards
 	}
+}
+
+func (l *listener) getHWMBlock() int64 {
+	l.hwmMux.Lock()
+	defer l.hwmMux.Unlock()
+	return l.hwmBlock
 }
 
 // listenerCatchupLoop reads pages of blocks at a time, until it gets within the configured catchup-threshold
@@ -183,8 +190,27 @@ func (l *listener) listenerCatchupLoop() {
 			return
 		}
 
-		fromBlock := l.hwmBlock
-		toBlock := l.hwmBlock + l.c.catchupPageSize - 1
+		// Never advance our HWM past the position of the lead group - we must join it rather than
+		// scan past it, otherwise we mark the re-org unstable blocks it deliberately holds back
+		// from as already scanned, and can never re-detect events a re-org introduces into them.
+		headBlock, established := l.es.catchupCeiling()
+		fromBlock := l.getHWMBlock()
+		toBlock := fromBlock + l.c.catchupPageSize - 1
+		if established && toBlock >= headBlock {
+			toBlock = headBlock - 1 // the resulting HWM (toBlock+1) is at most headBlock
+		}
+		if !established || fromBlock > toBlock {
+			// Either the lead group's position is not yet established - in which case we are
+			// deliberately held in catchup (see checkReadyForLeadPackOrRemoved) - or we have caught
+			// up to it and are waiting to be classified as ready to join it. Either way, do not scan.
+			select {
+			case <-time.After(l.c.eventFilterPollingInterval):
+				continue
+			case <-ctx.Done():
+				log.L(ctx).Infof("Listener catchup loop exiting as stream is stopping")
+				return
+			}
+		}
 		events, err := l.es.getBlockRangeEvents(ctx, al, fromBlock, toBlock)
 		if err != nil {
 			if l.c.catchupDownscaleRegex.String() != "" && l.c.catchupDownscaleRegex.MatchString(err.Error()) {
@@ -224,9 +250,7 @@ func (l *listener) filterEnrichEthLog(ctx context.Context, f *eventFilter, metho
 	blockNumber := trimUint64(ethLog.BlockNumber.Uint64())
 	transactionIndex := trimUint64(ethLog.TransactionIndex.Uint64())
 	logIndex := trimUint64(ethLog.LogIndex.Uint64())
-	l.hwmMux.Lock()
-	hwmBlock := l.hwmBlock
-	l.hwmMux.Unlock()
+	hwmBlock := l.getHWMBlock()
 	if blockNumber < hwmBlock {
 		log.L(ctx).Debugf("Listener %s already delivered event '%s' hwm=%d", l.id, getEventProtoID(blockNumber, transactionIndex, logIndex), hwmBlock)
 		return nil, false, nil

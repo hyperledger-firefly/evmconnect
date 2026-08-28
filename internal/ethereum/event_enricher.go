@@ -71,8 +71,8 @@ func (ee *eventEnricher) filterEnrichEthLog(ctx context.Context, f *eventFilter,
 			log.L(ctx).Errorf("Failed to set chain ID due to failed to query chain readiness: %+v", err)
 			return nil, matched, decoded, err
 		}
-		if !resp.Ready {
-			log.L(ctx).Errorf("Failed to set chain ID due to the connector is not ready")
+		if !resp.Ready || len(ee.connector.chainID) == 0 {
+			log.L(ctx).Errorf("Failed to set chain ID ready=%t chainID='%s'", resp.Ready, ee.connector.chainID)
 			return nil, matched, decoded, i18n.NewError(ctx, msgs.MsgFailedToRetrieveChainID)
 		}
 	}

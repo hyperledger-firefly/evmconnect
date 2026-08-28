@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
@@ -62,7 +63,7 @@ type eventStream struct {
 	mux            sync.Mutex
 	updateCount    int
 	listeners      map[fftypes.UUID]*listener
-	headBlock      int64
+	headBlock      atomic.Int64 // the stream's head position, -1 until established - atomic as it is read for listener catchup classification without the stream lock
 	streamLoopDone chan struct{}
 	catchup        bool
 }
@@ -198,6 +199,15 @@ func (es *eventStream) removeEventListener(listenerID *fftypes.UUID) {
 	}
 }
 
+// catchupCeiling is the block position of the lead group. A listener in individual catchup
+// must never advance its HWM past this point - on reaching it, it joins the lead group
+// instead (see checkReadyForLeadPackOrRemoved). Returns false if the stream's head position
+// has not yet been established, in which case no catchup scanning can safely take place.
+func (es *eventStream) catchupCeiling() (int64, bool) {
+	headBlock := es.headBlock.Load()
+	return headBlock, headBlock >= 0
+}
+
 func (es *eventStream) rejoinLeadGroup(l *listener) {
 	l.es.mux.Lock()
 	defer l.es.mux.Unlock()
@@ -258,8 +268,8 @@ func (es *eventStream) leadGroupCatchup() bool {
 		// Determine the earliest block we need to poll from
 		fromBlock := int64(-1)
 		for _, l := range ag.listeners {
-			if fromBlock < 0 || l.hwmBlock < fromBlock {
-				fromBlock = l.hwmBlock
+			if lHWM := l.getHWMBlock(); fromBlock < 0 || lHWM < fromBlock {
+				fromBlock = lHWM
 			}
 		}
 
@@ -345,8 +355,8 @@ func (es *eventStream) leadGroupSteadyState() bool {
 				// Determine the earliest block we need to poll from
 				fromBlock := int64(-1)
 				for _, l := range ag.listeners {
-					if fromBlock < 0 || l.hwmBlock < fromBlock {
-						fromBlock = l.hwmBlock
+					if lHWM := l.getHWMBlock(); fromBlock < 0 || lHWM < fromBlock {
+						fromBlock = lHWM
 					}
 				}
 
@@ -404,9 +414,7 @@ func (es *eventStream) leadGroupSteadyState() bool {
 			}
 
 			// Update the head block to be the hwm block
-			es.mux.Lock()
-			es.headBlock = hwmBlock
-			es.mux.Unlock()
+			es.headBlock.Store(hwmBlock)
 		}
 
 		// Reset failure count if we reach here
@@ -429,19 +437,40 @@ func (es *eventStream) preStartProcessing() {
 		log.L(ctx).Warnf("Event stream closed before establishing block height")
 		return
 	}
+	// The lead group never advances past checkpointBlockGap behind the chain head, as those blocks
+	// are re-org unstable. We establish our head position on the same basis, so that a listener
+	// held in catchup clamps against a safe ceiling from the moment it is established.
+	safeHead := int64(chainHead) - es.c.checkpointBlockGap //nolint:gosec // convert to int64 to match the type of headBlock
+	if safeHead < 0 {
+		safeHead = 0
+	}
+	// Take the stream lock while we establish the head position - listeners can be added
+	// concurrently (the stream is externally visible before this routine runs)
+	es.mux.Lock()
+	headBlock := int64(-1)
 	for _, l := range es.listeners {
 		// During initial start we move the "head" block forwards to be the highest of all the initial streams
-		if l.hwmBlock > es.headBlock {
-			if l.hwmBlock > int64(chainHead) { //nolint:gosec // convert to int64 to match the type of headBlock
-				es.headBlock = int64(chainHead) //nolint:gosec // convert to int64 to match the type of headBlock
-			} else {
-				es.headBlock = l.hwmBlock
-			}
+		if lHWM := l.getHWMBlock(); lHWM > headBlock {
+			headBlock = lHWM
 		}
 	}
-
-	// Now we've done that, we can start all the listeners
+	if headBlock < 0 || headBlock > safeHead {
+		// Either there were no initial listeners, or they are all ahead of the safe point. Either way
+		// the head position is the safe point, so that listeners added later are classified against a
+		// real head position (a listener started while headBlock is unestablished is held in catchup -
+		// see checkReadyForLeadPackOrRemoved)
+		headBlock = safeHead
+	}
+	es.headBlock.Store(headBlock)
+	initialListeners := make([]*listener, 0, len(es.listeners))
 	for _, l := range es.listeners {
+		initialListeners = append(initialListeners, l)
+	}
+	es.mux.Unlock()
+
+	// Now we've done that, we can start all the listeners (startEventListener takes the stream
+	// lock itself, and is idempotent for any that were also started via EventListenerAdd)
+	for _, l := range initialListeners {
 		es.startEventListener(l)
 	}
 }
