@@ -27,6 +27,7 @@ import (
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
 	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/metric"
 	"github.com/hyperledger-firefly/common/pkg/retry"
 	"github.com/hyperledger-firefly/common/pkg/wsclient"
 	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
@@ -89,6 +90,7 @@ type BlockListener interface {
 	WaitClosed()
 	GetBackend() rpcbackend.RPC
 	UTSetBackend(rpcbackend.RPC)
+	InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error
 }
 
 func toMinimalBlockInfoList(blocks []*ethrpc.BlockInfoJSONRPC) []*ethrpc.MinimalBlockInfo {
@@ -142,6 +144,10 @@ type blockListener struct {
 
 	// headBlockNumber mode: last head value sent on the block listener channel (only written from listenLoop)
 	currentChainHead uint64
+
+	// metrics are optional - only emitted once InitMetrics has been called
+	metricsLock sync.RWMutex
+	metrics     metric.MetricsManager
 }
 
 func NewBlockListener(ctx context.Context, retry *retry.Retry, conf *BlockListenerConfig, httpConf *ffresty.Config, wsConf *wsclient.WSConfig) (bl BlockListener, err error) {
@@ -295,26 +301,28 @@ func (bl *blockListener) establishBlockHeightWithRetry() error {
 		}
 
 		// Now get the block height
-		var hexBlockHeight ethtypes.HexInteger
-		rpcErr := bl.backend.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
-		if rpcErr != nil {
-			log.L(bl.ctx).Warnf("Block height could not be obtained: %s", rpcErr.Message)
-			return true, rpcErr.Error()
+		head, err := bl.queryBlockHeightFromRPC()
+		if err != nil {
+			log.L(bl.ctx).Warnf("Block height could not be obtained: %s", err)
+			return true, err
 		}
 
-		bl.setHighestBlock(hexBlockHeight.BigInt().Uint64())
+		bl.setHighestBlock(head)
 		return false, nil
 	})
 }
 
-// refreshHighestBlockFromRPC updates highestBlock from eth_blockNumber. Caller must not hold canonicalChainLock.
-func (bl *blockListener) refreshHighestBlockFromRPC() (uint64, error) {
+// queryBlockHeightFromRPC queries eth_blockNumber and returns the result, without updating any listener
+// state. Caller must not hold canonicalChainLock. The height the node reports is recorded on the target block height gauge.
+func (bl *blockListener) queryBlockHeightFromRPC() (uint64, error) {
 	var hexBlockHeight ethtypes.HexInteger
 	rpcErr := bl.backend.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
 	if rpcErr != nil {
+		bl.incPollFailureMetric("eth_blockNumber")
 		return 0, rpcErr.Error()
 	}
 	head := hexBlockHeight.BigInt().Uint64()
+	bl.setBlockHeightMetric(metricTargetBlockHeight, head)
 	return head, nil
 }
 
@@ -367,10 +375,17 @@ func (bl *blockListener) listenLoop() {
 			}
 		}
 
+		// In full chain tracking mode, the loop below never queries the height the node reports, so we refresh
+		// it here for the target metric. Done ahead of the filter calls.
+		if bl.ChainTrackingMode != ffcapi.ChainTrackingModeLight {
+			bl.refreshTargetBlockHeightMetric()
+		}
+
 		if filter == "" {
 			err := bl.backend.CallRPC(bl.ctx, &filter, "eth_newBlockFilter")
 			if err != nil {
 				log.L(bl.ctx).Errorf("Failed to establish new block filter: %s", err.Message)
+				bl.incPollFailureMetric("eth_newBlockFilter")
 				failCount++
 				continue
 			}
@@ -393,6 +408,7 @@ func (bl *blockListener) listenLoop() {
 					gapPotential = true
 				}
 				log.L(bl.ctx).Errorf("Failed to query block filter changes: %s", rpcErr.Message)
+				bl.incPollFailureMetric("eth_getFilterChanges")
 				failCount++
 				continue
 			}
@@ -400,17 +416,20 @@ func (bl *blockListener) listenLoop() {
 		}
 
 		if bl.ChainTrackingMode == ffcapi.ChainTrackingModeLight {
-			head, err := bl.refreshHighestBlockFromRPC()
+			head, err := bl.queryBlockHeightFromRPC()
 			if err != nil {
 				log.L(bl.ctx).Errorf("Failed to refresh chain head: %s", err)
 				failCount++
 				continue
 			}
+			// In light mode there is no canonical chain being built, so the head we dispatch to
+			// consumers is what we report as the canonical height
 			if head == bl.currentChainHead {
 				failCount = 0
 				continue
 			}
 			bl.currentChainHead = head
+			bl.setBlockHeightMetric(metricCanonicalBlockHeight, bl.currentChainHead)
 			update := &ffcapi.BlockHashEvent{GapPotential: false, Created: fftypes.Now(), HeadBlockNumber: bl.currentChainHead}
 			bl.consumerMux.Lock()
 			consumers := make([]*BlockUpdateConsumer, 0, len(bl.consumers))
@@ -778,6 +797,7 @@ func (bl *blockListener) GetHeadBlockNumber(_ context.Context) uint64 {
 }
 
 func (bl *blockListener) setHighestBlock(block uint64) {
+	defer bl.setBlockHeightMetric(metricCanonicalBlockHeight, block)
 	bl.canonicalChainLock.Lock()
 	defer bl.canonicalChainLock.Unlock()
 	bl.highestBlock = block
@@ -793,6 +813,9 @@ func (bl *blockListener) checkAndSetHighestBlock(bi *ethrpc.BlockInfoJSONRPC) {
 		bl.highestBlock = block
 		bl.highestBlockSet = true
 		bl.headBlockInfo = bi
+		// The gauge is bound to the same variable GetHighestBlock reports to event streams, so it is the
+		// head we are actually tracking rather than a separate sample of it.
+		bl.setBlockHeightMetric(metricCanonicalBlockHeight, block)
 	} else if block == bl.highestBlock {
 		// Height already known from eth_blockNumber. Store the first full block at that height.
 		bl.headBlockInfo = bi

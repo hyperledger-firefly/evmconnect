@@ -169,6 +169,7 @@ func (es *eventStream) addEventListener(ctx context.Context, req *ffcapi.EventLi
 
 func (es *eventStream) startEventListener(l *listener) {
 	es.mux.Lock()
+	defer es.mux.Unlock()
 	readyForLead, removed := l.checkReadyForLeadPackOrRemoved(es.ctx)
 	startCatchupLoop := !readyForLead && !removed && l.catchupLoopDone == nil /* idempotent - do not spawn a second loop */
 	if readyForLead && l.catchup {
@@ -177,9 +178,6 @@ func (es *eventStream) startEventListener(l *listener) {
 	}
 	if startCatchupLoop {
 		l.catchupLoopDone = make(chan struct{})
-	}
-	es.mux.Unlock()
-	if startCatchupLoop {
 		go l.listenerCatchupLoop()
 	}
 }
