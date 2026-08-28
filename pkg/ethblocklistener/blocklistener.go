@@ -313,8 +313,7 @@ func (bl *blockListener) establishBlockHeightWithRetry() error {
 }
 
 // queryBlockHeightFromRPC queries eth_blockNumber and returns the result, without updating any listener
-// state. The height the node reports is recorded on the target block height gauge - the only source of
-// that metric, so it is always exactly what the node last told us.
+// state. Caller must not hold canonicalChainLock. The height the node reports is recorded on the target block height gauge.
 func (bl *blockListener) queryBlockHeightFromRPC() (uint64, error) {
 	var hexBlockHeight ethtypes.HexInteger
 	rpcErr := bl.backend.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
@@ -376,10 +375,8 @@ func (bl *blockListener) listenLoop() {
 			}
 		}
 
-		// In full chain tracking mode the loop below never queries the height the node reports, so refresh
-		// it here for the target metric. Done ahead of the filter calls, so that when they start failing -
-		// exactly when the gap between the node and the chain we have built matters - we can still see the
-		// chain moving on without us. No-ops (and makes no query) when metrics are not enabled.
+		// In full chain tracking mode, the loop below never queries the height the node reports, so we refresh
+		// it here for the target metric. Done ahead of the filter calls.
 		if bl.ChainTrackingMode != ffcapi.ChainTrackingModeLight {
 			bl.refreshTargetBlockHeightMetric()
 		}
@@ -800,11 +797,11 @@ func (bl *blockListener) GetHeadBlockNumber(_ context.Context) uint64 {
 }
 
 func (bl *blockListener) setHighestBlock(block uint64) {
+	defer bl.setBlockHeightMetric(metricCanonicalBlockHeight, block)
 	bl.canonicalChainLock.Lock()
+	defer bl.canonicalChainLock.Unlock()
 	bl.highestBlock = block
 	bl.highestBlockSet = true
-	bl.canonicalChainLock.Unlock()
-	bl.setBlockHeightMetric(metricCanonicalBlockHeight, block)
 }
 
 // checkAndSetHighestBlock records the chain head height and caches full block info for the head.
@@ -817,8 +814,7 @@ func (bl *blockListener) checkAndSetHighestBlock(bi *ethrpc.BlockInfoJSONRPC) {
 		bl.highestBlockSet = true
 		bl.headBlockInfo = bi
 		// The gauge is bound to the same variable GetHighestBlock reports to event streams, so it is the
-		// head we are actually tracking rather than a separate sample of it. Just a gauge set, no I/O,
-		// so we accept doing it while we hold the write lock.
+		// head we are actually tracking rather than a separate sample of it.
 		bl.setBlockHeightMetric(metricCanonicalBlockHeight, block)
 	} else if block == bl.highestBlock {
 		// Height already known from eth_blockNumber. Store the first full block at that height.

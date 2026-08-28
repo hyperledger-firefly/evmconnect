@@ -35,15 +35,12 @@ const (
 	// mode the head of the in-memory canonical chain built from the block filter / newHeads subscription,
 	// and in light mode the head we dispatch to consumers. It should track the target height very closely.
 	metricCanonicalBlockHeight = "canonical_block_height"
-	// metricPollFailures counts the JSON/RPC polls the listen loop makes that failed, labelled by method,
-	// so a node/endpoint that is failing to answer is distinguishable from one that is answering with a
-	// height that is not moving.
+	// metricPollFailures counts the JSON/RPC polls the listen loop makes that failed, labelled by method.
 	metricPollFailures      = "poll_failures_total"
 	metricLabelPollFailures = "method"
 )
 
-// InitMetrics registers the block listener metrics against the supplied registry. The metrics are emitted
-// inline from the listener logic that maintains the block heights - no separate poll loop is started.
+// InitMetrics registers the block listener metrics against the supplied registry.
 func (bl *blockListener) InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error {
 	mm, err := registry.NewMetricsManagerForSubsystem(ctx, metricsSubsystem)
 	if err != nil {
@@ -82,9 +79,7 @@ func (bl *blockListener) incPollFailureMetric(method string) {
 }
 
 // refreshTargetBlockHeightMetric queries the node for the height it reports, purely so the target gauge
-// stays current. Only needed in full chain tracking mode - light mode already queries eth_blockNumber on
-// every iteration to track the head, and in full mode we would otherwise never call it again after startup,
-// leaving no way to see the chain moving on while our filter has gone quiet.
+// stays current. Only needed in full chain tracking mode.
 func (bl *blockListener) refreshTargetBlockHeightMetric() {
 	if bl.getMetrics() == nil {
 		return // never drive any query of the node when metrics are not enabled
