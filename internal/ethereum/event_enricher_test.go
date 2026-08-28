@@ -25,6 +25,7 @@ import (
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/signer/pkg/abi"
 	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -331,6 +332,174 @@ func TestEventEnricher_FilterEnrichEthLog_ChainIDNotSet(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, matched)
 	assert.NotNil(t, ev)
+}
+
+func TestEventEnricher_FilterEnrichEthLog_ChainIDQueryFail(t *testing.T) {
+	_, conn, mRPC, done := newTestConnector(t)
+	defer done()
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "net_version", mock.Anything).Return(&rpcbackend.RPCError{Message: "pop"}).Maybe()
+
+	// Unset chainID to force IsReady call
+	conn.chainID = ""
+	ee := &eventEnricher{
+		connector:     conn,
+		extractSigner: false,
+	}
+
+	var eventABI *abi.Entry
+	err := json.Unmarshal([]byte(`{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "name": "from", "type": "address"},
+			{"indexed": true, "name": "to", "type": "address"},
+			{"indexed": false, "name": "value", "type": "uint256"}
+		],
+		"name": "Transfer",
+		"type": "event"
+	}`), &eventABI)
+	assert.NoError(t, err)
+
+	topic0, err := eventABI.SignatureHashCtx(context.Background())
+	assert.NoError(t, err)
+	addr := ethtypes.MustNewAddress("0x112233445566778899aabbccddeeff0011223344")
+	filter := &eventFilter{
+		Topic0:  topic0,
+		Address: addr,
+		Event:   eventABI,
+	}
+
+	log := &ethrpc.LogJSONRPC{
+		Address:          addr,
+		Topics:           []ethtypes.HexBytes0xPrefix{topic0},
+		Data:             []byte{},
+		BlockNumber:      ethtypes.HexUint64(100),
+		TransactionIndex: ethtypes.HexUint64(1),
+		LogIndex:         ethtypes.HexUint64(0),
+		BlockHash:        ethtypes.HexBytes0xPrefix{},
+	}
+
+	ctx := context.Background()
+	ev, matched, _, err := ee.filterEnrichEthLog(ctx, filter, []*abi.Entry{eventABI}, log)
+	assert.Regexp(t, "pop", err)
+	assert.True(t, matched)
+	assert.Nil(t, ev)
+}
+
+func TestEventEnricher_FilterEnrichEthLog_BlockNotFound(t *testing.T) {
+	_, conn, mRPC, done := newTestConnector(t)
+	defer done()
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "net_version", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = "1"
+	}).Maybe()
+	// Return a nil block, without an error, so the timestamp cannot be enriched
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByHash", mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	conn.eventBlockTimestamps = true
+	ee := &eventEnricher{
+		connector:     conn,
+		extractSigner: false,
+	}
+
+	var eventABI *abi.Entry
+	err := json.Unmarshal([]byte(`{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "name": "from", "type": "address"},
+			{"indexed": true, "name": "to", "type": "address"},
+			{"indexed": false, "name": "value", "type": "uint256"}
+		],
+		"name": "Transfer",
+		"type": "event"
+	}`), &eventABI)
+	assert.NoError(t, err)
+
+	topic0, err := eventABI.SignatureHashCtx(context.Background())
+	assert.NoError(t, err)
+	addr := ethtypes.MustNewAddress("0x112233445566778899aabbccddeeff0011223344")
+	filter := &eventFilter{
+		Topic0:  topic0,
+		Address: addr,
+		Event:   eventABI,
+	}
+
+	log := &ethrpc.LogJSONRPC{
+		Address:          addr,
+		Topics:           []ethtypes.HexBytes0xPrefix{topic0},
+		Data:             []byte{},
+		BlockNumber:      ethtypes.HexUint64(100),
+		TransactionIndex: ethtypes.HexUint64(1),
+		LogIndex:         ethtypes.HexUint64(0),
+		BlockHash:        ethtypes.MustNewHexBytes0xPrefix("0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c"),
+	}
+
+	ctx := context.Background()
+	ev, matched, _, err := ee.filterEnrichEthLog(ctx, filter, []*abi.Entry{eventABI}, log)
+	assert.Regexp(t, "FF23011", err)
+	assert.True(t, matched)
+	assert.Nil(t, ev)
+}
+
+func TestEventEnricher_FilterEnrichEthLog_TransactionNotFound(t *testing.T) {
+	_, conn, mRPC, done := newTestConnector(t)
+	defer done()
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "net_version", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = "1"
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByHash", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		bi := &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number: ethtypes.HexUint64(100),
+		}}
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = bi
+	}).Maybe()
+	// Return a nil transaction, without an error, so the method/signer cannot be enriched
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionByHash", mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	ee := &eventEnricher{
+		connector:     conn,
+		extractSigner: true,
+	}
+
+	var eventABI *abi.Entry
+	err := json.Unmarshal([]byte(`{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "name": "from", "type": "address"},
+			{"indexed": true, "name": "to", "type": "address"},
+			{"indexed": false, "name": "value", "type": "uint256"}
+		],
+		"name": "Transfer",
+		"type": "event"
+	}`), &eventABI)
+	assert.NoError(t, err)
+
+	topic0, err := eventABI.SignatureHashCtx(context.Background())
+	assert.NoError(t, err)
+	addr := ethtypes.MustNewAddress("0x112233445566778899aabbccddeeff0011223344")
+	filter := &eventFilter{
+		Topic0:  topic0,
+		Address: addr,
+		Event:   eventABI,
+	}
+
+	log := &ethrpc.LogJSONRPC{
+		Address:          addr,
+		Topics:           []ethtypes.HexBytes0xPrefix{topic0},
+		Data:             []byte{},
+		BlockNumber:      ethtypes.HexUint64(100),
+		TransactionIndex: ethtypes.HexUint64(1),
+		LogIndex:         ethtypes.HexUint64(0),
+		BlockHash:        ethtypes.HexBytes0xPrefix{},
+		TransactionHash:  ethtypes.MustNewHexBytes0xPrefix("0x1a1f797ee000c529b6a2dd330cedd0d081417a30d16a4eecb3f863ab4657246f"),
+	}
+
+	ctx := context.Background()
+	ev, matched, _, err := ee.filterEnrichEthLog(ctx, filter, []*abi.Entry{eventABI}, log)
+	assert.Regexp(t, "FF23057", err)
+	assert.True(t, matched)
+	assert.Nil(t, ev)
 }
 
 func TestTrimUint64Panics(t *testing.T) {

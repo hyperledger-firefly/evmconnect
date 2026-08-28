@@ -140,6 +140,7 @@ func (es *eventStream) addEventListener(ctx context.Context, req *ffcapi.EventLi
 		c:        es.c,
 		es:       es,
 		hwmBlock: -1,
+		catchup:  true, // starts in catchup, joins lead group only once started
 		config: listenerConfig{
 			name:      req.Name,
 			fromBlock: req.FromBlock,
@@ -160,16 +161,21 @@ func (es *eventStream) addEventListener(ctx context.Context, req *ffcapi.EventLi
 	}
 	log.L(es.ctx).Infof("Initialized listener '%s' (FromBlock=%s) Block=%d Checkpoint=%+v", l.id, l.config.fromBlock, l.hwmBlock, checkpoint)
 
-	es.updateCount++
 	es.listeners[*req.ListenerID] = l
 
 	return l, nil
 }
 
 func (es *eventStream) startEventListener(l *listener) {
+	es.mux.Lock()
+	defer es.mux.Unlock()
 	readyForLead, removed := l.checkReadyForLeadPackOrRemoved(es.ctx)
-	l.catchup = !readyForLead
-	if l.catchup && !removed {
+	startCatchupLoop := !readyForLead && !removed && l.catchupLoopDone == nil /* idempotent - do not spawn a second loop */
+	if readyForLead && l.catchup {
+		l.catchup = false
+		es.updateCount++ // we've flipped catchup to false - so this tells the head group to rebuild and include us
+	}
+	if startCatchupLoop {
 		l.catchupLoopDone = make(chan struct{})
 		go l.listenerCatchupLoop()
 	}
@@ -482,7 +488,7 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 
 	// Move the HWM on all each listener forwards, if they are behind the base HWM for the event stream itself
 	for _, l := range ag.listeners {
-		l.moveHWM(hwm)
+		l.moveHWMForwards(hwm)
 	}
 
 	return false

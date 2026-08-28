@@ -145,11 +145,11 @@ func (l *listener) getHWMCheckpoint() *listenerCheckpoint {
 	}
 }
 
-func (l *listener) moveHWM(hwmBlock int64) {
+func (l *listener) moveHWMForwards(hwmBlock int64) {
 	l.hwmMux.Lock()
 	defer l.hwmMux.Unlock()
 	if hwmBlock > l.hwmBlock {
-		l.hwmBlock = hwmBlock
+		l.hwmBlock = hwmBlock // check against moving backwards
 	}
 }
 
@@ -213,9 +213,7 @@ func (l *listener) listenerCatchupLoop() {
 				return
 			}
 		}
-		l.hwmMux.Lock()
-		l.hwmBlock = toBlock + 1
-		l.hwmMux.Unlock()
+		l.moveHWMForwards(toBlock + 1)
 		failCount = 0 // Reset on success
 	}
 }
@@ -226,8 +224,11 @@ func (l *listener) filterEnrichEthLog(ctx context.Context, f *eventFilter, metho
 	blockNumber := trimUint64(ethLog.BlockNumber.Uint64())
 	transactionIndex := trimUint64(ethLog.TransactionIndex.Uint64())
 	logIndex := trimUint64(ethLog.LogIndex.Uint64())
-	if blockNumber < l.hwmBlock {
-		log.L(ctx).Debugf("Listener %s already delivered event '%s' hwm=%d", l.id, getEventProtoID(blockNumber, transactionIndex, logIndex), l.hwmBlock)
+	l.hwmMux.Lock()
+	hwmBlock := l.hwmBlock
+	l.hwmMux.Unlock()
+	if blockNumber < hwmBlock {
+		log.L(ctx).Debugf("Listener %s already delivered event '%s' hwm=%d", l.id, getEventProtoID(blockNumber, transactionIndex, logIndex), hwmBlock)
 		return nil, false, nil
 	}
 
