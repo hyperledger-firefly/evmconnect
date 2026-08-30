@@ -75,6 +75,7 @@ type eventStream struct {
 type aggregatedListener struct {
 	signatureSet      []ethtypes.HexBytes0xPrefix // a list of unique topic[0] event signatures to listener for
 	listenersByTopic0 map[string][]*listener      // a map of all listeners that are interested in an event signature - they may not be interested in the event itself (depending on sub-selection)
+	listenersByID     map[fftypes.UUID]*listener  // a map of all listeners by ID, to resolve the listener that generated an event when dispatching it
 	listeners         []*listener                 // list of all listeners
 }
 
@@ -506,10 +507,7 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 		}
 	} else {
 		for _, event := range events {
-			log.L(es.ctx).Debugf("Detected event %s", event.Event)
-			select {
-			case es.events <- event:
-			case <-es.ctx.Done():
+			if es.markDetectedAndDispatch(ag, event) {
 				return true
 			}
 		}
@@ -524,12 +522,26 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 
 }
 
+// markDetectedAndDispatch records the detection point then (importantly afterwards) pushes the event to FFTM
+func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ffcapi.ListenerEvent) (exiting bool) {
+	log.L(es.ctx).Debugf("Detected event %s", event.Event)
+	ag.listenersByID[*event.Event.ID.ListenerID].markDetected(event.Checkpoint.(*listenerCheckpoint))
+	select {
+	case es.events <- event:
+		return false
+	case <-es.ctx.Done():
+		return true
+	}
+}
+
 func (es *eventStream) buildAggregatedListener(listeners []*listener) *aggregatedListener {
 	ag := &aggregatedListener{
 		listeners:         listeners,
 		listenersByTopic0: make(map[string][]*listener),
+		listenersByID:     make(map[fftypes.UUID]*listener),
 	}
 	for _, l := range listeners {
+		ag.listenersByID[*l.id] = l
 		for _, f := range l.config.filters {
 			sigStr := f.Topic0.String()
 			topicListeners, existing := ag.listenersByTopic0[sigStr]
@@ -595,8 +607,10 @@ func (es *eventStream) getListenerHWM(ctx context.Context, listenerID *fftypes.U
 	if l == nil {
 		return nil, ffcapi.ErrorReasonNotFound, i18n.NewError(ctx, msgs.MsgListenerNotStarted, listenerID, es.id)
 	}
+	scanned, lastDetected := l.getHWM()
 	return &ffcapi.EventListenerHWMResponse{
-		Checkpoint: l.getHWMCheckpoint(),
-		Catchup:    l.catchup || es.catchup, // dirty read of whether the listener is in catchup, or the head group of the stream is in catchup
+		Checkpoint:   scanned,
+		LastDetected: lastDetected,
+		Catchup:      l.catchup || es.catchup, // dirty read of whether the listener is in catchup, or the head group of the stream is in catchup
 	}, "", nil
 }

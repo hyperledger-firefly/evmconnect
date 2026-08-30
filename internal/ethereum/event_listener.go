@@ -60,8 +60,9 @@ type listener struct {
 	c               *ethConnector
 	es              *eventStream
 	ee              *eventEnricher
-	hwmMux          sync.Mutex // Protects checkpoint of an individual listener. May hold ES lock when taking this, must NOT attempt to obtain ES lock while holding this
-	hwmBlock        int64
+	hwmMux          sync.Mutex          // Protects hwmBlock and lastDetected. May hold ES lock when taking this, must NOT attempt to obtain ES lock while holding this
+	hwmBlock        int64               // the scan position - the block we have polled for events up to (exclusive)
+	lastDetected    *listenerCheckpoint // the checkpoint of the highest event we have pushed to FFTM - see ffcapi.EventListenerHWMResponse
 	config          listenerConfig
 	removed         bool
 	catchup         bool
@@ -130,19 +131,34 @@ func (l *listener) checkReadyForLeadPackOrRemoved(ctx context.Context) (bool, bo
 	return readyForLead, l.removed
 }
 
-// getHWMCheckpoint gets the point the event polling is up to for this listener.
-// Note this intentionally does not account for dispatched events, as the parent framework ensures that
-// this checkpoint is only persisted when there are no events in-flight pending dispatch for this listener,
-// and the checkpoint for this listener is stale.
-func (l *listener) getHWMCheckpoint() *listenerCheckpoint {
+// getHWM returns under the hmwMux lock as consistent set of:
+// 1. Scan position - where event polling is up to, for detection of new events
+// 2. Last detected - the checkpoint of the highest event pushed to the FFTM channel (or nil)
+// See ffcapi.EventListenerHWMResponse for the contract defined by FFTM for these
+func (l *listener) getHWM() (scanned ffcapi.EventListenerCheckpoint, lastDetected ffcapi.EventListenerCheckpoint) {
 	l.hwmMux.Lock()
 	defer l.hwmMux.Unlock()
 	// Generate a checkpoint before the first transaction, in the high watermark block
-	log.L(l.es.ctx).Debugf("HWM checkpoint block for '%s': %d", l.id, l.hwmBlock)
-	return &listenerCheckpoint{
+	log.L(l.es.ctx).Debugf("HWM checkpoint block for '%s': %d (lastDetected=%+v)", l.id, l.hwmBlock, l.lastDetected)
+	scanned = &listenerCheckpoint{
 		Block:            l.hwmBlock,
 		TransactionIndex: -1,
 		LogIndex:         -1,
+	}
+	if l.lastDetected != nil {
+		lastDetected = l.lastDetected
+	}
+	return scanned, lastDetected
+}
+
+// markDetected records the checkpoint of an event, and must be called pushing the event to FFTM
+func (l *listener) markDetected(cp *listenerCheckpoint) {
+	l.hwmMux.Lock()
+	defer l.hwmMux.Unlock()
+	// Only ever move forwards - a re-detection (such as after a re-org, or a filter reset) must not
+	// lower the bar FFTM uses to decide the scan position is safe to record as a checkpoint.
+	if l.lastDetected == nil || l.lastDetected.LessThan(cp) {
+		l.lastDetected = cp
 	}
 }
 

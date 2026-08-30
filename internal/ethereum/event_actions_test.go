@@ -159,6 +159,26 @@ func TestEventStreamStartStopOk(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, int64(testHighBlock), r2.Checkpoint.(*listenerCheckpoint).Block)
+	// Nothing has been pushed to FFTM for this listener, so we must report an untyped nil
+	assert.True(t, r2.LastDetected == nil)
+
+	// Once we have pushed an event, we report its checkpoint as the detection point
+	c.eventStreams[*sID].listeners[*lID].markDetected(&listenerCheckpoint{
+		Block:            testHighBlock,
+		TransactionIndex: 123,
+		LogIndex:         0,
+	})
+	r2b, _, err := c.EventListenerHWM(ctx, &ffcapi.EventListenerHWMRequest{
+		StreamID:   sID,
+		ListenerID: lID,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, int64(testHighBlock), r2b.Checkpoint.(*listenerCheckpoint).Block)
+	assert.Equal(t, &listenerCheckpoint{
+		Block:            testHighBlock,
+		TransactionIndex: 123,
+		LogIndex:         0,
+	}, r2b.LastDetected)
 
 	_, _, err = c.EventStreamStopped(ctx, &ffcapi.EventStreamStoppedRequest{
 		ID: sID,

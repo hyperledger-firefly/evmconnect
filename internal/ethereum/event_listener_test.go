@@ -681,3 +681,40 @@ func TestFilterEnrichEthLogMethodBadInputABIData(t *testing.T) {
 	assert.Nil(t, ei.InputArgs)
 
 }
+
+func TestGetHWMNoDetectionsYet(t *testing.T) {
+
+	l, _, cancelCtx := newTestListener(t, false)
+	defer cancelCtx()
+
+	l.hwmBlock = 1000
+
+	scanned, lastDetected := l.getHWM()
+	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: -1, LogIndex: -1}, scanned)
+	// Must be an untyped nil interface - a nil *listenerCheckpoint inside a non-nil interface
+	// would make FFTM believe we had detected something, and panic comparing against it
+	assert.True(t, lastDetected == nil)
+
+}
+
+func TestMarkDetectedOnlyMovesForwards(t *testing.T) {
+
+	l, _, cancelCtx := newTestListener(t, false)
+	defer cancelCtx()
+
+	l.markDetected(&listenerCheckpoint{Block: 1000, TransactionIndex: 5, LogIndex: 0})
+	_, lastDetected := l.getHWM()
+	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: 5, LogIndex: 0}, lastDetected)
+
+	// A later event in the same block moves it forwards
+	l.markDetected(&listenerCheckpoint{Block: 1000, TransactionIndex: 7, LogIndex: 0})
+	_, lastDetected = l.getHWM()
+	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: 7, LogIndex: 0}, lastDetected)
+
+	// A re-detection of an earlier event does not lower the bar FFTM uses to decide
+	// the scan position is safe to apply
+	l.markDetected(&listenerCheckpoint{Block: 999, TransactionIndex: 0, LogIndex: 0})
+	_, lastDetected = l.getHWM()
+	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: 7, LogIndex: 0}, lastDetected)
+
+}

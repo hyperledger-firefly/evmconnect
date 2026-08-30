@@ -1221,10 +1221,20 @@ func TestDispatchListenerDone(t *testing.T) {
 		ctx:    doneCtx,
 		events: make(chan<- *ffcapi.ListenerEvent),
 	}
-	exiting := es.dispatchSetHWMCheckExit(&aggregatedListener{}, ffcapi.ListenerEvents{
-		{},
+	l := &listener{id: fftypes.NewUUID(), es: es}
+	ag := es.buildAggregatedListener([]*listener{l})
+	exiting := es.dispatchSetHWMCheckExit(ag, ffcapi.ListenerEvents{
+		{
+			Checkpoint: &listenerCheckpoint{Block: 1000, TransactionIndex: 10, LogIndex: 1},
+			Event:      &ffcapi.Event{ID: ffcapi.EventID{ListenerID: l.id}},
+		},
 	}, -1)
 	assert.True(t, exiting)
+
+	// The detection point is recorded before the dispatch, so it survives losing the ctx race -
+	// this can only ever hold the checkpoint back, never advance it past an undelivered event
+	_, lastDetected := l.getHWM()
+	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: 10, LogIndex: 1}, lastDetected)
 
 }
 
@@ -1238,5 +1248,37 @@ func TestGetListenerHWMNotFound(t *testing.T) {
 	_, rc, err := es.getListenerHWM(context.Background(), fftypes.NewUUID())
 	assert.Regexp(t, "FF23043", err)
 	assert.Equal(t, ffcapi.ErrorReasonNotFound, rc)
+
+}
+
+func TestDispatchSetHWMDetectionBeforeScanPosition(t *testing.T) {
+
+	delivered := make(chan *ffcapi.ListenerEvent, 2)
+	es := &eventStream{
+		ctx:    context.Background(),
+		events: delivered,
+	}
+	l := &listener{id: fftypes.NewUUID(), es: es}
+	ag := es.buildAggregatedListener([]*listener{l})
+
+	exiting := es.dispatchSetHWMCheckExit(ag, ffcapi.ListenerEvents{
+		{
+			Checkpoint: &listenerCheckpoint{Block: 1000, TransactionIndex: 5, LogIndex: 0},
+			Event:      &ffcapi.Event{ID: ffcapi.EventID{ListenerID: l.id}},
+		},
+		{
+			Checkpoint: &listenerCheckpoint{Block: 1000, TransactionIndex: 7, LogIndex: 0},
+			Event:      &ffcapi.Event{ID: ffcapi.EventID{ListenerID: l.id}},
+		},
+	}, 1001)
+	assert.False(t, exiting)
+	assert.Len(t, delivered, 2)
+
+	// The scan position has moved past the block, but the detection point pins it to the highest
+	// event we pushed - so FFTM holds the checkpoint back until it has committed that far
+	scanned, lastDetected := l.getHWM()
+	assert.Equal(t, &listenerCheckpoint{Block: 1001, TransactionIndex: -1, LogIndex: -1}, scanned)
+	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: 7, LogIndex: 0}, lastDetected)
+	assert.True(t, lastDetected.LessThan(scanned))
 
 }
