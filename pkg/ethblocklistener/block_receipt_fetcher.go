@@ -106,25 +106,71 @@ func (brr *blockReceiptRequest) run() {
 }
 
 // resetReceiptCache clears all cached transaction receipts when the canonical chain
-// changes (fork trim, chain rebuild, or re-initialization). Receipts are keyed only by
-// transaction hash, so after a reorg the same hash can refer to a block that is no
-// longer canonical. Purging avoids serving stale receipts.
+// is re-initialized with no valid existing block. Receipts are keyed only by transaction
+// hash, so after a reorg the same hash can refer to a block that is no longer canonical.
 //
 // The generation counter invalidates any in-flight async fetches that complete after
 // the reset, so they cannot repopulate the cache with orphaned data.
 //
-// The current implementation is intentionally brute-force.
-// All receipts are dropped and refetched for the whole canonical chain at once.
-// Selective invalidation by block height or hash could be more efficient and is a
-// candidate for future enhancement if re-orgs are frequent enough to justify the complexity.
+// Fork trims use invalidateReceiptsForForkTrim instead, which drops only receipts for
+// the orphaned tail blocks and leaves the canonical prefix cache intact.
 func (bl *blockListener) resetReceiptCache() {
 	if bl.txReceiptCache == nil {
 		return
 	}
 	bl.txReceiptCacheLock.Lock()
 	defer bl.txReceiptCacheLock.Unlock()
+	bl.resetReceiptCacheLocked()
+}
+
+// Caller MUST hold txReceiptCacheLock
+func (bl *blockListener) resetReceiptCacheLocked() {
 	bl.txReceiptCache.Purge()
 	bl.txReceiptCacheGeneration++
+	bl.invalidatedReceiptBlockHashes = make(map[string]struct{})
+}
+
+// invalidateReceiptsForForkTrim drops cached receipts for blocks removed from the
+// canonical chain tail during a fork. Blocks indexed by the listener carry their
+// transaction hashes, so entries are removed directly by tx hash. Trimmed block
+// hashes are also recorded so in-flight async fetches cannot repopulate them.
+func (bl *blockListener) invalidateReceiptsForForkTrim(trimmedBlocks []*ethrpc.BlockInfoJSONRPC) {
+	if bl.txReceiptCache == nil || len(trimmedBlocks) == 0 {
+		return
+	}
+
+	bl.txReceiptCacheLock.Lock()
+	defer bl.txReceiptCacheLock.Unlock()
+
+	// Check if the invalidated block hash set is too large, if so reset the cache
+	// monitored head length, which is the deepest possible single fork trim. Entries are
+	// only removed when a trimmed block becomes canonical again, so on a long-running
+	// listener the set would otherwise grow with every fork trim. Hitting the bound
+	// falls back to a full cache reset, which is always safe.
+	// When no valid block was found during a rebuild, the cache is fully reset anyway, so
+	// that path is not affected by this check.
+	if len(bl.invalidatedReceiptBlockHashes)+len(trimmedBlocks) > bl.MonitoredHeadLength {
+		bl.resetReceiptCacheLocked()
+		return
+	}
+	for _, bi := range trimmedBlocks {
+		if bi == nil || bi.Hash == nil {
+			continue
+		}
+		bl.invalidatedReceiptBlockHashes[bi.Hash.String()] = struct{}{}
+		for _, txHash := range bi.Transactions {
+			bl.txReceiptCache.Remove(txHash.String())
+		}
+	}
+}
+
+func (bl *blockListener) revalidateReceiptBlockHash(blockHash ethtypes.HexBytes0xPrefix) {
+	if bl.txReceiptCache == nil || blockHash == nil {
+		return
+	}
+	bl.txReceiptCacheLock.Lock()
+	delete(bl.invalidatedReceiptBlockHashes, blockHash.String())
+	bl.txReceiptCacheLock.Unlock()
 }
 
 func (bl *blockListener) getReceiptCacheGeneration() uint64 {
@@ -133,7 +179,11 @@ func (bl *blockListener) getReceiptCacheGeneration() uint64 {
 	return bl.txReceiptCacheGeneration
 }
 
-func (bl *blockListener) storeReceiptsInCache(receipts []*ethrpc.TxReceiptJSONRPC, generation uint64) {
+// storeReceiptsInCache stores the receipts in the cache.
+// The generation must match the current generation, otherwise the receipts are ignored.
+// The blockHash is used to check if the receipts are for a block that is no longer canonical.
+// If the blockHash is provided, the receipts are only stored if the block is not in the invalidatedReceiptBlockHashes map.
+func (bl *blockListener) storeReceiptsInCache(receipts []*ethrpc.TxReceiptJSONRPC, generation uint64, blockHash ethtypes.HexBytes0xPrefix) {
 	if bl.txReceiptCache == nil {
 		return
 	}
@@ -142,8 +192,18 @@ func (bl *blockListener) storeReceiptsInCache(receipts []*ethrpc.TxReceiptJSONRP
 	if generation != bl.txReceiptCacheGeneration {
 		return
 	}
+	if blockHash != nil {
+		if _, invalidated := bl.invalidatedReceiptBlockHashes[blockHash.String()]; invalidated {
+			return
+		}
+	}
 	for _, r := range receipts {
 		if r != nil && r.TransactionHash != nil {
+			if r.BlockHash != nil {
+				if _, invalidated := bl.invalidatedReceiptBlockHashes[r.BlockHash.String()]; invalidated {
+					continue
+				}
+			}
 			bl.txReceiptCache.Add(r.TransactionHash.String(), r)
 		}
 	}
@@ -162,27 +222,43 @@ func (bl *blockListener) getCachedTransactionReceipt(txHash string) (*ethrpc.TxR
 	return cached.(*ethrpc.TxReceiptJSONRPC), true
 }
 
-func (bl *blockListener) fetchAndCacheBlockReceipts(bi *ethrpc.BlockInfoJSONRPC) {
+type pendingReceiptFetch struct {
+	blockInfo  *ethrpc.BlockInfoJSONRPC
+	generation uint64
+}
+
+// queueReceiptFetch records a block whose receipts should be fetched into the cache once
+// the canonical chain lock is released. The block is canonical at this point, so its hash
+// is revalidated and the cache generation snapshotted here, under the lock. If a fork trim
+// removes the block again before the fetch completes, the hash is re-invalidated and
+// storeReceiptsInCache discards the results.
+//
+// Caller MUST hold the canonicalChain WRITE LOCK
+func (bl *blockListener) queueReceiptFetch(bi *ethrpc.BlockInfoJSONRPC) {
 	if bl.txReceiptCache == nil {
 		return
 	}
-	generation := bl.getReceiptCacheGeneration()
-	bl.FetchBlockReceiptsAsync(bi.Number.Uint64(), bi.Hash, func(receipts []*ethrpc.TxReceiptJSONRPC, err error) {
-		if err != nil {
-			log.L(bl.ctx).Debugf("Failed to fetch receipts for block %d / %s: %v", bi.Number.Uint64(), bi.Hash, err)
-			return
-		}
-		bl.storeReceiptsInCache(receipts, generation)
+	bl.revalidateReceiptBlockHash(bi.Hash)
+	bl.pendingReceiptFetches = append(bl.pendingReceiptFetches, &pendingReceiptFetch{
+		blockInfo:  bi,
+		generation: bl.getReceiptCacheGeneration(),
 	})
 }
 
-func (bl *blockListener) refetchReceiptsForCanonicalChain() {
-	if bl.txReceiptCache == nil {
-		return
-	}
-	for pos := bl.canonicalChain.Front(); pos != nil; pos = pos.Next() {
-		if pos.Value != nil {
-			bl.fetchAndCacheBlockReceipts(pos.Value.(*ethrpc.BlockInfoJSONRPC))
-		}
+// dispatchPendingReceiptFetches starts the async receipt fetches for blocks queued by
+// queueReceiptFetch. FetchBlockReceiptsAsync blocks when the fetch concurrency throttle
+// is saturated, so this must be called WITHOUT the canonical chain lock held, to avoid
+// stalling readers of the chain.
+func (bl *blockListener) dispatchPendingReceiptFetches(pending []*pendingReceiptFetch) {
+	for _, f := range pending {
+		bi := f.blockInfo
+		generation := f.generation
+		bl.FetchBlockReceiptsAsync(bi.Number.Uint64(), bi.Hash, func(receipts []*ethrpc.TxReceiptJSONRPC, err error) {
+			if err != nil {
+				log.L(bl.ctx).Debugf("Failed to fetch receipts for block %d / %s: %v", bi.Number.Uint64(), bi.Hash, err)
+				return
+			}
+			bl.storeReceiptsInCache(receipts, generation, bi.Hash)
+		})
 	}
 }
