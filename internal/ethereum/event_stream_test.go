@@ -1767,3 +1767,152 @@ func TestLeadGroupGetLogsExitDuringDispatch(t *testing.T) {
 	done()
 	<-es.streamLoopDone
 }
+
+func TestLeadGroupGetLogsLightModeTrailsHead(t *testing.T) {
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 900)
+	defer done()
+	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+
+	var headMux sync.Mutex
+	head := uint64(1000)
+	mbl.On("GetHighestBlock", mock.Anything).Return(func(context.Context) (uint64, bool) {
+		headMux.Lock()
+		defer headMux.Unlock()
+		return head, true
+	})
+	// Note no SnapshotMonitoredHeadChain expectation - in light mode there is no canonical chain
+	// view, and the loop must never ask for one
+
+	type pollRange struct{ from, to, hwmAtCall int64 }
+	polls := make(chan pollRange, 20)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- pollRange{
+			from:      filter.FromBlock.BigInt().Int64(),
+			to:        filter.ToBlock.BigInt().Int64(),
+			hwmAtCall: l.getHWMBlock(),
+		}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	// In light mode we never poll the unstable window - delivery trails the head (1000) by
+	// checkpointBlockGap (50), so pagination stops at 950 even though the head is beyond it
+	expected := []pollRange{
+		{from: 900, to: 909, hwmAtCall: 900},
+		{from: 910, to: 919, hwmAtCall: 910},
+		{from: 920, to: 929, hwmAtCall: 920},
+		{from: 930, to: 939, hwmAtCall: 930},
+		{from: 940, to: 949, hwmAtCall: 940},
+		{from: 950, to: 950, hwmAtCall: 950},
+	}
+	for i, e := range expected {
+		select {
+		case p := <-polls:
+			assert.Equal(t, e, p, "poll %d", i)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for poll %d", i)
+		}
+	}
+
+	// When the head advances, the delivery position trails it by the same gap
+	headMux.Lock()
+	head = 1001
+	headMux.Unlock()
+	select {
+	case p := <-polls:
+		assert.Equal(t, pollRange{from: 951, to: 951, hwmAtCall: 950}, p)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for poll after head advance")
+	}
+
+	// Everything delivered is already checkpointBlockGap-confirmed, so the HWM tracks right
+	// behind the delivery position
+	assert.Eventually(t, func() bool {
+		return l.getHWMBlock() == 951 && es.headBlock.Load() == 951
+	}, 5*time.Second, time.Millisecond)
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+}
+
+func TestLeadGroupGetLogsLightModeHeadBelowGap(t *testing.T) {
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 0)
+	defer done()
+	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(5), true)
+
+	polls := make(chan []int64, 10)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	// The whole chain (head 5) is within checkpointBlockGap (50), so the delivery position
+	// clamps at genesis - only block 0 is polled (contrast with full mode, which polls [0,5])
+	assert.Equal(t, []int64{0, 0}, <-polls)
+	assert.Eventually(t, func() bool {
+		return es.headBlock.Load() == 0
+	}, 5*time.Second, time.Millisecond)
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+	assert.Equal(t, int64(0), l.getHWMBlock())
+}
+
+func TestLeadGroupCatchupLightModeClientCapsAtStableHead(t *testing.T) {
+
+	es, l, mRPC, mbl, _, done := testGetLogsModeStream(t, 900)
+	defer done()
+	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+	es.c.eventFilterPollingMode = FilterPollingModeClient
+	es.c.catchupThreshold = 100
+	es.c.catchupPageSize = 500
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+
+	polls := make(chan []int64, 10)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	// The head gap (100) is exactly at the catchup threshold, so catchup runs one page - but in
+	// light+client mode that page is capped at head-checkpointBlockGap (950) rather than running
+	// to fromBlock+catchupPageSize-1 (1399), so the unstable window is never delivered
+	exited := es.leadGroupCatchup()
+	assert.False(t, exited)
+	assert.Equal(t, []int64{900, 950}, <-polls)
+	assert.Equal(t, int64(951), l.getHWMBlock())
+}
+
+func TestLeadGroupCatchupLightModeClientCaughtUpToStableHead(t *testing.T) {
+
+	es, _, _, mbl, _, done := testGetLogsModeStream(t, 980)
+	defer done()
+	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+	es.c.eventFilterPollingMode = FilterPollingModeClient
+	es.c.catchupThreshold = 20
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+
+	// The head gap (20) is at the catchup threshold, but everything from the HWM (980) onwards is
+	// inside the unstable window (head-checkpointBlockGap = 950) - so light+client catchup exits
+	// without polling at all (no eth_getLogs expectation is registered - a poll fails the test)
+	exited := es.leadGroupCatchup()
+	assert.False(t, exited)
+}

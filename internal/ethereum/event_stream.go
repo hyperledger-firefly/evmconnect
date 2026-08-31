@@ -282,6 +282,18 @@ func (es *eventStream) leadGroupCatchup() bool {
 
 		// Poll in the range for events
 		toBlock := fromBlock + es.c.catchupPageSize - 1
+		// In client polling mode with light chain tracking, blocks in the unstable window at the
+		// head of the chain are never delivered (see leadGroupSteadyStateGetLogs) - including
+		// while paging through a backlog here
+		if es.c.eventFilterPollingMode == FilterPollingModeClient && es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+			if maxToBlock := blockNumberToInt64(chainHeadBlock) - es.c.checkpointBlockGap; toBlock > maxToBlock {
+				toBlock = maxToBlock
+			}
+			if toBlock < fromBlock {
+				log.L(es.ctx).Infof("Stream head is up to date with the stable chain fromBlock=%d chainHead=%d", fromBlock, chainHeadBlock)
+				return false
+			}
+		}
 		events, err := es.getBlockRangeEvents(es.ctx, ag, fromBlock, toBlock)
 		if err != nil {
 			log.L(es.ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d headBlock=%d: %s", fromBlock, toBlock, chainHeadBlock, err)

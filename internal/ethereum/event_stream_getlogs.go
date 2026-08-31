@@ -24,14 +24,10 @@ import (
 	"github.com/hyperledger-firefly/common/pkg/log"
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
-// getLogsPollState is the in-memory client-side filtering position for the getLogs steady state
-// (events.filterPollingMode: getLogs). As well as the next block to poll, we keep a sparse record
-// of the (number, hash) of blocks we have already polled that are still within the block listener's
-// monitored (re-org unstable) window, so that when a re-org happens behind our poll position we can
-// find the earliest block that diverged and rewind to exactly there - rather than re-delivering the
-// whole unstable window.
+// State required when doing all management of polling position client-side
 type getLogsPollState struct {
 	fromBlock   int64                      // the next block to poll
 	polledChain []*ethrpc.BlockInfoJSONRPC // sparse ascending (number, hash) records of polled blocks in the unstable window
@@ -45,8 +41,7 @@ func (ps *getLogsPollState) reset(fromBlock int64) {
 
 // checkReorgRewind compares the hashes recorded when we polled blocks, against the block listener's
 // current canonical chain view. On a mismatch the chain has re-organized behind our poll position,
-// so we rewind to the earliest diverging block to re-poll from there. Re-deliveries that result
-// from a rewind are de-duplicated in FFTM against its checkpoint.
+// so we rewind to the earliest diverging block to re-poll from there.
 func (ps *getLogsPollState) checkReorgRewind(ctx context.Context, headChain []*ethrpc.BlockInfoJSONRPC) {
 	if len(headChain) == 0 || len(ps.polledChain) == 0 {
 		return
@@ -59,7 +54,7 @@ func (ps *getLogsPollState) checkReorgRewind(ctx context.Context, headChain []*e
 		firstInWindow++
 	}
 	ps.polledChain = ps.polledChain[firstInWindow:]
-	// Find the earliest block we polled whose hash is no longer canonical
+	// Find the earliest block we polled whose hash is no longer canonical (lists are short and ordered, so linear scan is efficient)
 	for i, polled := range ps.polledChain {
 		polledNumber := blockNumberToInt64(polled.Number.Uint64())
 		canonicalHash := blockHashInHeadChain(headChain, polledNumber)
@@ -103,17 +98,22 @@ func blockHashInHeadChain(headChain []*ethrpc.BlockInfoJSONRPC, blockNumber int6
 }
 
 // leadGroupSteadyStateGetLogs is the alternative steady state to leadGroupSteadyState, selected with
-// events.filterPollingMode: getLogs. Instead of establishing a node-side filter, we track our own
+// events.filterPollingMode: client. Instead of establishing a node-side filter, we track our own
 // in-memory poll position and page forwards with stateless eth_getLogs range queries.
 //
 // The listener HWM (scan position used for the restart checkpoint) trails checkpointBlockGap behind
-// the chain head exactly as in filter mode - but is additionally clamped so it never passes the
-// in-memory poll position, as blocks beyond that have not been queried yet.
+// the chain head exactly as in server filter mode - but is additionally clamped so it never passes
+// the in-memory poll position, as blocks beyond that have not been queried yet.
 //
-// Because a re-org behind the poll position would otherwise go unnoticed until restart (a node-side
-// filter re-notifies logs on the new branch, a forwards poll position does not), we record the
-// hashes of the blocks we poll and check them each cycle against the block listener's canonical
-// chain view - see getLogsPollState.
+// Re-org behavior depends on the chainTrackingMode:
+//   - full: we poll all the way to the head of the chain. Because a re-org behind the poll position
+//     would otherwise go unnoticed until restart (a node-side filter re-notifies logs on the new
+//     branch, a forwards poll position does not), we record the hashes of the blocks we poll and
+//     check them each cycle against the block listener's canonical chain view - see getLogsPollState.
+//   - light: no block hashes are tracked, so instead we never poll the unstable window at the head
+//     of the chain. A block is only polled once it is checkpointBlockGap behind the head, at which
+//     point that gap is its confirmations - matching how light mode confirms transactions by the
+//     gap between their block and the head. Re-orgs within that gap are never observed.
 func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 	var ag *aggregatedListener
 	lastUpdate := -1
@@ -158,12 +158,26 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 				return false
 			}
 
-			// Check the blocks we already polled are still canonical, rewinding our position if not
-			headChain := es.c.blockListener.SnapshotMonitoredHeadChain()
-			poll.checkReorgRewind(es.ctx, headChain)
+			// In full chain tracking mode we poll all the way to the head, checking the blocks we
+			// already polled are still canonical and rewinding our position if not.
+			// In light chain tracking mode there is no canonical chain view to check against, so
+			// instead we never poll into the unstable window at all - a block is only delivered
+			// once it is checkpointBlockGap behind the head, at which point that gap is its
+			// confirmations (the same rule light mode applies to transaction confirmations).
+			deliveryHead := chainHead
+			var headChain []*ethrpc.BlockInfoJSONRPC
+			if es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+				deliveryHead = chainHead - es.c.checkpointBlockGap
+				if deliveryHead < 0 {
+					deliveryHead = 0
+				}
+			} else {
+				headChain = es.c.blockListener.SnapshotMonitoredHeadChain()
+				poll.checkReorgRewind(es.ctx, headChain)
+			}
 
 			// Poll the next page of blocks, if there are any we haven't polled yet
-			toBlock := chainHead
+			toBlock := deliveryHead
 			if maxToBlock := poll.fromBlock + es.c.catchupPageSize - 1; toBlock > maxToBlock {
 				toBlock = maxToBlock
 				caughtUpToHead = false // page again immediately, rather than waiting the polling interval
