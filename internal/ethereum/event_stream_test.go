@@ -18,12 +18,16 @@ package ethereum
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/hyperledger-firefly/common/pkg/config"
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/evmconnect/mocks/ethblocklistenermocks"
 	"github.com/hyperledger-firefly/evmconnect/mocks/rpcbackendmocks"
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
@@ -1281,4 +1285,485 @@ func TestDispatchSetHWMDetectionBeforeScanPosition(t *testing.T) {
 	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: 7, LogIndex: 0}, lastDetected)
 	assert.True(t, lastDetected.LessThan(scanned))
 
+}
+
+func TestLeadGroupDeliverEventsGetLogsMode(t *testing.T) {
+
+	lID := fftypes.NewUUID()
+	l1req := &ffcapi.EventListenerAddRequest{
+		ListenerID: lID,
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"address":"0xc89E46EEED41b777ca6625d37E1Cc87C5c037828","event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: strconv.Itoa(testHighBlock),
+		},
+	}
+
+	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeGetLogs))
+	})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
+	})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", mock.Anything, false).Return(nil).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = testBlockFilterID1
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getFilterChanges", testBlockFilterID1).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]ethtypes.HexBytes0xPrefix) = nil
+	}).Maybe()
+	// Note there are deliberately no mocks for eth_newFilter/eth_getFilterLogs/eth_uninstallFilter -
+	// getLogs mode must never establish a node-side log filter
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		assert.Equal(t, int64(testHighBlock), filter.FromBlock.BigInt().Int64())
+		assert.Equal(t, int64(testHighBlock), filter.ToBlock.BigInt().Int64())
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{
+			{
+				BlockNumber:      ethtypes.HexUint64(testHighBlock),
+				TransactionIndex: ethtypes.HexUint64(64),
+				LogIndex:         ethtypes.HexUint64(2),
+				BlockHash:        ethtypes.MustNewHexBytes0xPrefix("0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c"),
+				Address:          ethtypes.MustNewAddress("0xc89E46EEED41b777ca6625d37E1Cc87C5c037828"),
+				Topics: []ethtypes.HexBytes0xPrefix{
+					ethtypes.MustNewHexBytes0xPrefix("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+					ethtypes.MustNewHexBytes0xPrefix("0x0000000000000000000000003968ef051b422d3d1cdc182a88bba8dd922e6fa4"),
+					ethtypes.MustNewHexBytes0xPrefix("0x000000000000000000000000d0f2f5103fd050739a9fb567251bc460cc24d091"),
+				},
+				Data: ethtypes.MustNewHexBytes0xPrefix("0x00000000000000000000000000000000000000000000000000000000000003e8"),
+			},
+		}
+	}).Once()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByHash", "0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c", false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number: ethtypes.HexUint64(testHighBlock),
+			Hash:   ethtypes.MustNewHexBytes0xPrefix("0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c"),
+		}}
+	})
+
+	es, events, _, done := testEventStreamExistingConnector(t, ctx, done, c, mRPC, l1req)
+	defer done()
+
+	e := <-events
+	assert.Equal(t, fftypes.FFuint64(testHighBlock), e.Event.ID.BlockNumber)
+	assert.Equal(t, fftypes.FFuint64(64), e.Event.ID.TransactionIndex)
+	assert.Equal(t, fftypes.FFuint64(2), e.Event.ID.LogIndex)
+	assert.Equal(t, int64(testHighBlock), e.Checkpoint.(*listenerCheckpoint).Block)
+	assert.Equal(t, int64(64), e.Checkpoint.(*listenerCheckpoint).TransactionIndex)
+	assert.Equal(t, int64(2), e.Checkpoint.(*listenerCheckpoint).LogIndex)
+	assert.Equal(t, "0x3968ef051b422d3d1cdc182a88bba8dd922e6fa4", e.Event.Data.JSONObject().GetString("from"))
+	assert.Equal(t, "0xd0f2f5103fd050739a9fb567251bc460cc24d091", e.Event.Data.JSONObject().GetString("to"))
+	assert.Equal(t, "1000", e.Event.Data.JSONObject().GetString("value"))
+
+	// The detection point must be recorded before the dispatch we received
+	_, lastDetected := es.listeners[*lID].getHWM()
+	assert.Equal(t, &listenerCheckpoint{Block: testHighBlock, TransactionIndex: 64, LogIndex: 2}, lastDetected)
+
+	mRPC.AssertExpectations(t)
+}
+
+func TestLeadGroupSteadyStateGetLogsFallbackToCatchup(t *testing.T) {
+
+	ctx, c, mRPC, done := newTestConnector(t)
+	mockStreamLoopEmpty(mRPC)
+	defer done()
+
+	es := &eventStream{
+		id:     fftypes.NewUUID(),
+		c:      c,
+		ctx:    ctx,
+		events: make(chan<- *ffcapi.ListenerEvent),
+		listeners: map[fftypes.UUID]*listener{
+			*fftypes.NewUUID(): {
+				id: fftypes.NewUUID(),
+				config: listenerConfig{
+					filters: []*eventFilter{
+						{},
+					},
+				},
+			},
+		},
+		streamLoopDone: make(chan struct{}),
+	}
+	es.headBlock.Store(-1)
+
+	// The listener HWM of zero is way behind the chain head, so we must fall back to catchup
+	endedDueToExit := es.leadGroupSteadyStateGetLogs()
+	assert.False(t, endedDueToExit)
+}
+
+func TestLeadGroupGetLogsRetry(t *testing.T) {
+
+	l1req := &ffcapi.EventListenerAddRequest{
+		ListenerID: fftypes.NewUUID(),
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: strconv.Itoa(testHighBlock),
+		},
+	}
+	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeGetLogs))
+	})
+
+	retried := make(chan struct{})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
+	})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", mock.Anything, false).Return(nil).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = testBlockFilterID1
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getFilterChanges", testBlockFilterID1).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]ethtypes.HexBytes0xPrefix) = nil
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(&rpcbackend.RPCError{Message: "pop"}).
+		Run(func(args mock.Arguments) {
+			close(retried)
+		}).Once()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(&rpcbackend.RPCError{Message: "pop"}).Maybe()
+
+	_, _, mRPC, done = testEventStreamExistingConnector(t, ctx, done, c, mRPC, l1req)
+	defer done()
+
+	<-retried
+
+}
+
+// testGetLogsModeStream builds an eventStream with a mocked block listener for driving
+// leadGroupSteadyStateGetLogs directly with precise control of the chain head and the
+// canonical chain snapshot
+func testGetLogsModeStream(t *testing.T, hwmBlock int64) (*eventStream, *listener, *rpcbackendmocks.Backend, *ethblocklistenermocks.BlockListener, context.CancelFunc, func()) {
+	_, c, mRPC, done := newTestConnector(t)
+	ctx, cancelCtx := context.WithCancel(context.Background())
+
+	c.catchupPageSize = 10
+	c.catchupThreshold = 2000
+	c.checkpointBlockGap = 50
+	c.eventFilterPollingInterval = 1 * time.Millisecond
+	c.retry.MaximumDelay = 1 * time.Microsecond
+
+	mbl := ethblocklistenermocks.NewBlockListener(t)
+	mbl.On("WaitClosed").Return().Maybe()
+	c.blockListener = mbl
+
+	es := &eventStream{
+		id:             fftypes.NewUUID(),
+		c:              c,
+		ctx:            ctx,
+		events:         make(chan<- *ffcapi.ListenerEvent),
+		listeners:      map[fftypes.UUID]*listener{},
+		streamLoopDone: make(chan struct{}),
+	}
+	lID := fftypes.NewUUID()
+	l := &listener{
+		id:       lID,
+		c:        c,
+		es:       es,
+		hwmBlock: hwmBlock,
+		config: listenerConfig{
+			filters: []*eventFilter{
+				{},
+			},
+		},
+	}
+	es.listeners[*lID] = l
+
+	return es, l, mRPC, mbl, cancelCtx, func() {
+		cancelCtx()
+		done()
+	}
+}
+
+// testHeadChain builds a deterministic canonical chain snapshot - blocks at/above forkBlock get a
+// different hash to the same block number below forkBlock, simulating a re-org fork at that point
+func testHeadChain(fromBlock, toBlock, forkBlock int64) []*ethrpc.BlockInfoJSONRPC {
+	chain := make([]*ethrpc.BlockInfoJSONRPC, 0, toBlock-fromBlock+1)
+	for b := fromBlock; b <= toBlock; b++ {
+		fork := 0
+		if b >= forkBlock {
+			fork = 1
+		}
+		chain = append(chain, &ethrpc.BlockInfoJSONRPC{
+			Number: ethtypes.HexUint64(b), //nolint:gosec
+			Hash:   ethtypes.MustNewHexBytes0xPrefix(fmt.Sprintf("0x%060x%04x", b, fork)),
+		})
+	}
+	return chain
+}
+
+func TestLeadGroupGetLogsPaginationAndHWMClamp(t *testing.T) {
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 900)
+	defer done()
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+	mbl.On("SnapshotMonitoredHeadChain").Return([]*ethrpc.BlockInfoJSONRPC{}).Maybe()
+
+	type pollRange struct{ from, to, hwmAtCall int64 }
+	polls := make(chan pollRange, 20)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- pollRange{
+			from:      filter.FromBlock.BigInt().Int64(),
+			to:        filter.ToBlock.BigInt().Int64(),
+			hwmAtCall: l.getHWMBlock(),
+		}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	// We page forwards in catchupPageSize pages until we reach the head of the chain. The HWM
+	// trails checkpointBlockGap (50) behind the chain head, but during pagination is clamped so
+	// it never passes the blocks we have not yet polled.
+	expected := []pollRange{
+		{from: 900, to: 909, hwmAtCall: 900},
+		{from: 910, to: 919, hwmAtCall: 910},
+		{from: 920, to: 929, hwmAtCall: 920},
+		{from: 930, to: 939, hwmAtCall: 930},
+		{from: 940, to: 949, hwmAtCall: 940},
+		{from: 950, to: 959, hwmAtCall: 950},
+		{from: 960, to: 969, hwmAtCall: 950},
+		{from: 970, to: 979, hwmAtCall: 950},
+		{from: 980, to: 989, hwmAtCall: 950},
+		{from: 990, to: 999, hwmAtCall: 950},
+		{from: 1000, to: 1000, hwmAtCall: 950},
+	}
+	for i, e := range expected {
+		select {
+		case p := <-polls:
+			assert.Equal(t, e, p, "poll %d", i)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for poll %d", i)
+		}
+	}
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+
+	// The HWM never advances past the reorg-safe point behind the head of the chain
+	assert.Equal(t, int64(950), l.getHWMBlock())
+	assert.Equal(t, int64(950), es.headBlock.Load())
+}
+
+func TestLeadGroupGetLogsReorgRewind(t *testing.T) {
+
+	es, _, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 995)
+	defer done()
+
+	var mux sync.Mutex
+	reorged := false
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+	mbl.On("SnapshotMonitoredHeadChain").Return(func() []*ethrpc.BlockInfoJSONRPC {
+		mux.Lock()
+		defer mux.Unlock()
+		if reorged {
+			// Blocks 998 and above have been replaced on a new fork
+			return testHeadChain(990, 1000, 998)
+		}
+		return testHeadChain(990, 1000, 1001 /* no fork */)
+	})
+
+	polls := make(chan []int64, 20)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	// First poll takes us to the head of the chain, recording the hashes of blocks 995-1000
+	assert.Equal(t, []int64{995, 1000}, <-polls)
+
+	// Re-org blocks 998-1000 - the hash continuity check must find the earliest diverging
+	// block, and rewind the poll position to exactly there (not the whole unstable window)
+	mux.Lock()
+	reorged = true
+	mux.Unlock()
+	assert.Equal(t, []int64{998, 1000}, <-polls)
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+}
+
+func TestGetLogsPollStateCheckReorgRewind(t *testing.T) {
+
+	ctx := context.Background()
+	canonicalChain := testHeadChain(990, 1000, 1001 /* no fork */)
+
+	// Nothing recorded - nothing to check
+	ps := &getLogsPollState{fromBlock: 1001}
+	ps.checkReorgRewind(ctx, canonicalChain)
+	assert.Equal(t, int64(1001), ps.fromBlock)
+
+	// Empty snapshot - nothing to compare against
+	ps = &getLogsPollState{fromBlock: 1001, polledChain: testHeadChain(995, 1000, 1001)}
+	ps.checkReorgRewind(ctx, []*ethrpc.BlockInfoJSONRPC{})
+	assert.Equal(t, int64(1001), ps.fromBlock)
+	assert.Len(t, ps.polledChain, 6)
+
+	// Records below the monitored window are pruned as stable; matching hashes cause no rewind
+	ps = &getLogsPollState{fromBlock: 1001, polledChain: testHeadChain(985, 1000, 1001)}
+	ps.checkReorgRewind(ctx, canonicalChain)
+	assert.Equal(t, int64(1001), ps.fromBlock)
+	assert.Len(t, ps.polledChain, 11) // 990-1000
+	assert.Equal(t, int64(990), int64(ps.polledChain[0].Number))
+
+	// Records above the top of the window are skipped (nothing to compare against)
+	ps = &getLogsPollState{fromBlock: 1006, polledChain: testHeadChain(995, 1005, 1006)}
+	ps.checkReorgRewind(ctx, canonicalChain)
+	assert.Equal(t, int64(1006), ps.fromBlock)
+	assert.Len(t, ps.polledChain, 11) // 995-1005
+
+	// The earliest diverging block wins - records forked at 997 rewind exactly there, and
+	// the records at/after the divergence are discarded
+	ps = &getLogsPollState{fromBlock: 1001, polledChain: testHeadChain(995, 1000, 997)}
+	ps.checkReorgRewind(ctx, canonicalChain)
+	assert.Equal(t, int64(997), ps.fromBlock)
+	assert.Len(t, ps.polledChain, 2) // 995, 996
+	assert.Equal(t, int64(996), int64(ps.polledChain[1].Number))
+}
+
+func TestGetLogsPollStateAdvance(t *testing.T) {
+
+	// Only blocks in the polled range [fromBlock, toBlock] are recorded
+	ps := &getLogsPollState{fromBlock: 995}
+	ps.advance(testHeadChain(990, 1000, 1001), 998)
+	assert.Equal(t, int64(999), ps.fromBlock)
+	assert.Len(t, ps.polledChain, 4) // 995-998
+	assert.Equal(t, int64(995), int64(ps.polledChain[0].Number))
+	assert.Equal(t, int64(998), int64(ps.polledChain[3].Number))
+
+	// Blocks polled below the monitored window leave no record (they are already stable)
+	ps = &getLogsPollState{fromBlock: 900}
+	ps.advance(testHeadChain(990, 1000, 1001), 950)
+	assert.Equal(t, int64(951), ps.fromBlock)
+	assert.Empty(t, ps.polledChain)
+}
+
+func TestBlockNumberToInt64Overflow(t *testing.T) {
+	assert.Equal(t, int64(12345), blockNumberToInt64(12345))
+	assert.Panics(t, func() {
+		blockNumberToInt64(uint64(math.MaxInt64) + 1)
+	})
+}
+
+func TestLeadGroupGetLogsExitGettingHighBlock(t *testing.T) {
+
+	es, _, _, mbl, _, done := testGetLogsModeStream(t, 0)
+	defer done()
+
+	// The block listener closing while we check the chain head means we are shutting down
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(0), false)
+	assert.True(t, es.leadGroupSteadyStateGetLogs())
+}
+
+func TestLeadGroupGetLogsHWMClampAtZero(t *testing.T) {
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 0)
+	defer done()
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(5), true)
+	mbl.On("SnapshotMonitoredHeadChain").Return([]*ethrpc.BlockInfoJSONRPC{}).Maybe()
+
+	polls := make(chan []int64, 10)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	assert.Equal(t, []int64{0, 5}, <-polls)
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+
+	// The whole chain (head 5) is within checkpointBlockGap (50) of genesis, so the HWM clamps at zero
+	assert.Equal(t, int64(0), l.getHWMBlock())
+	assert.Equal(t, int64(0), es.headBlock.Load())
+}
+
+func TestLeadGroupGetLogsExitDuringDispatch(t *testing.T) {
+
+	lID := fftypes.NewUUID()
+	l1req := &ffcapi.EventListenerAddRequest{
+		ListenerID: lID,
+		EventListenerOptions: ffcapi.EventListenerOptions{
+			Filters: []fftypes.JSONAny{
+				*fftypes.JSONAnyPtr(`{"address":"0xc89E46EEED41b777ca6625d37E1Cc87C5c037828","event":` + abiTransferEvent + `}`),
+			},
+			Options:   fftypes.JSONAnyPtr(`{}`),
+			FromBlock: strconv.Itoa(testHighBlock),
+		},
+	}
+
+	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeGetLogs))
+	})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
+	})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", mock.Anything, false).Return(nil).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = testBlockFilterID1
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getFilterChanges", testBlockFilterID1).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]ethtypes.HexBytes0xPrefix) = nil
+	}).Maybe()
+	polled := make(chan struct{})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		close(polled)
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{
+			{
+				BlockNumber:      ethtypes.HexUint64(testHighBlock),
+				TransactionIndex: ethtypes.HexUint64(64),
+				LogIndex:         ethtypes.HexUint64(2),
+				BlockHash:        ethtypes.MustNewHexBytes0xPrefix("0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c"),
+				Address:          ethtypes.MustNewAddress("0xc89E46EEED41b777ca6625d37E1Cc87C5c037828"),
+				Topics: []ethtypes.HexBytes0xPrefix{
+					ethtypes.MustNewHexBytes0xPrefix("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+					ethtypes.MustNewHexBytes0xPrefix("0x0000000000000000000000003968ef051b422d3d1cdc182a88bba8dd922e6fa4"),
+					ethtypes.MustNewHexBytes0xPrefix("0x000000000000000000000000d0f2f5103fd050739a9fb567251bc460cc24d091"),
+				},
+				Data: ethtypes.MustNewHexBytes0xPrefix("0x00000000000000000000000000000000000000000000000000000000000003e8"),
+			},
+		}
+	}).Once()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByHash", mock.Anything, false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number: ethtypes.HexUint64(testHighBlock),
+			Hash:   ethtypes.MustNewHexBytes0xPrefix("0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c"),
+		}}
+	}).Maybe()
+
+	// Note we never read from the events channel, so the dispatch of the event blocks until
+	// the stream context is cancelled - covering the exit path during dispatch
+	es, _, mRPC, done := testEventStreamExistingConnector(t, ctx, done, c, mRPC, l1req)
+
+	<-polled
+	done()
+	<-es.streamLoopDone
 }

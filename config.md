@@ -113,6 +113,7 @@
 |catchupThreshold|How many blocks behind the chain head an event stream or listener must be on startup, to enter catchup mode|`int`|`500`
 |checkpointBlockGap|The number of blocks at the head of the chain that should be considered unstable (could be dropped from the canonical chain after a re-org). Unless events with a full set of confirmations are detected, the restart checkpoint will this many blocks behind the chain head.|`int`|`50`
 |filterPollingInterval|The interval between polling calls to a filter, when checking for newly arrived events|[`time.Duration`](https://pkg.go.dev/time#Duration)|`1s`
+|filterPollingMode|How the steady state event loop polls for new events once caught up with the head of the chain. 'filter' establishes a node-side filter with eth_newFilter and polls it with eth_getFilterChanges. 'getLogs' uses stateless eth_getLogs range queries with the connector tracking its own poll position, avoiding node-side filter state entirely|filter,getLogs|`filter`
 
 ## connector.net
 
