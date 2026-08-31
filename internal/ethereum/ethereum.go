@@ -55,7 +55,7 @@ type ethConnector struct {
 	eventBlockTimestamps       bool
 	blockListener              ethblocklistener.BlockListener
 	eventFilterPollingInterval time.Duration
-	eventFilterPollingMode     filterPollingMode
+	eventHeadTrackingMode      headTrackingMode
 	traceTXForRevertReason     bool
 	chainID                    string
 
@@ -118,12 +118,12 @@ func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc e
 		return nil, i18n.NewError(ctx, msgs.MsgInvalidChainTrackingMode, chainTrackingMode)
 	}
 
-	eventFilterPollingMode := filterPollingMode(conf.GetString(EventsFilterPollingMode))
-	if eventFilterPollingMode == "" {
-		eventFilterPollingMode = FilterPollingModeFilter
+	eventHeadTrackingMode := headTrackingMode(conf.GetString(EventsHeadTrackingMode))
+	if eventHeadTrackingMode == "" {
+		eventHeadTrackingMode = HeadTrackingModeServerFilter
 	}
-	if eventFilterPollingMode != FilterPollingModeFilter && eventFilterPollingMode != FilterPollingModeGetLogs {
-		return nil, i18n.NewError(ctx, msgs.MsgInvalidFilterPollingMode, eventFilterPollingMode)
+	if eventHeadTrackingMode != HeadTrackingModeServerFilter && eventHeadTrackingMode != HeadTrackingModeClientOnly {
+		return nil, i18n.NewError(ctx, msgs.MsgInvalidHeadTrackingMode, eventHeadTrackingMode)
 	}
 
 	c := &ethConnector{
@@ -134,7 +134,7 @@ func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc e
 		checkpointBlockGap:         conf.GetInt64(EventsCheckpointBlockGap),
 		eventBlockTimestamps:       conf.GetBool(EventsBlockTimestamps),
 		eventFilterPollingInterval: conf.GetDuration(EventsFilterPollingInterval),
-		eventFilterPollingMode:     eventFilterPollingMode,
+		eventHeadTrackingMode:      eventHeadTrackingMode,
 		traceTXForRevertReason:     conf.GetBool(TraceTXForRevertReason),
 		chainTrackingMode:          chainTrackingMode,
 		retry:                      retryutil.RetryWrapper{Retry: &retry.Retry{}},

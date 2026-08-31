@@ -37,7 +37,7 @@ const (
 	EventsCheckpointBlockGap    = "events.checkpointBlockGap"
 	EventsBlockTimestamps       = "events.blockTimestamps"
 	EventsFilterPollingInterval = "events.filterPollingInterval"
-	EventsFilterPollingMode     = "events.filterPollingMode"
+	EventsHeadTrackingMode      = "events.headTrackingMode"
 	RetryInitDelay              = "queryLoopRetry.initialDelay"
 	RetryMaxDelay               = "queryLoopRetry.maxDelay"
 	RetryFactor                 = "queryLoopRetry.factor"
@@ -58,17 +58,17 @@ const (
 	UseGetBlockReceipts           = "useGetBlockReceipts"
 )
 
-// filterPollingMode determines how the steady state loop of an event stream polls for new events,
+// headTrackingMode determines how the steady state loop of an event stream tracks the head of the chain,
 // once it has caught up with the head of the chain.
-type filterPollingMode string
+type headTrackingMode string
 
 const (
-	// FilterPollingModeFilter uses a node-side filter, established with eth_newFilter and polled
+	// HeadTrackingModeServerFilter uses a node-side filter, established with eth_newFilter and polled
 	// with eth_getFilterChanges, so the node tracks which logs are new since the last poll
-	FilterPollingModeFilter filterPollingMode = "filter"
-	// FilterPollingModeGetLogs uses stateless eth_getLogs range queries, with the connector tracking
+	HeadTrackingModeServerFilter headTrackingMode = "server-filter"
+	// HeadTrackingModeClientOnly uses stateless eth_getLogs range queries, with the connector tracking
 	// its own in-memory poll position - avoiding node-side filter state entirely
-	FilterPollingModeGetLogs filterPollingMode = "getLogs"
+	HeadTrackingModeClientOnly headTrackingMode = "client-only"
 )
 
 const (
@@ -98,7 +98,7 @@ func InitConfig(conf config.Section) {
 	conf.AddKnownKey(ConfigGasEstimationFactor, DefaultGasEstimationFactor)
 	conf.AddKnownKey(EventsBlockTimestamps, true)
 	conf.AddKnownKey(EventsFilterPollingInterval, "1s")
-	conf.AddKnownKey(EventsFilterPollingMode, string(FilterPollingModeFilter))
+	conf.AddKnownKey(EventsHeadTrackingMode, string(HeadTrackingModeServerFilter))
 	conf.AddKnownKey(EventsCatchupPageSize, DefaultCatchupPageSize)
 	conf.AddKnownKey(EventsCatchupThreshold, DefaultEventsCatchupThreshold)
 	conf.AddKnownKey(EventsCatchupDownscaleRegex, DefaultEventsCatchupDownscaleRegex)
