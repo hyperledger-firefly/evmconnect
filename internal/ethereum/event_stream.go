@@ -304,7 +304,7 @@ func (es *eventStream) leadGroupCatchup() bool {
 func (es *eventStream) uninstallFilter(filter *string) {
 	if *filter != "" {
 		var res bool
-		if err := es.c.backend.CallRPC(es.ctx, &res, "eth_uninstallFilter", filter); err != nil {
+		if err := es.c.rpc.CallRPC(es.ctx, &res, "eth_uninstallFilter", filter); err != nil {
 			log.L(es.ctx).Warnf("Error uninstalling filter '%v': %s", filter, err.Message)
 		} else {
 			log.L(es.ctx).Debugf("Uninstalled filter '%v': %t", filter, res)
@@ -368,7 +368,7 @@ func (es *eventStream) leadGroupSteadyState() bool {
 				}
 
 				// Create the new filter
-				err := es.c.backend.CallRPC(es.ctx, &filter, "eth_newFilter", &ethrpc.LogFilterJSONRPC{
+				err := es.c.rpc.CallRPC(es.ctx, &filter, "eth_newFilter", &ethrpc.LogFilterJSONRPC{
 					FromBlock: ethtypes.NewHexInteger64(fromBlock),
 					Topics: [][]ethtypes.HexBytes0xPrefix{
 						ag.signatureSet,
@@ -384,7 +384,7 @@ func (es *eventStream) leadGroupSteadyState() bool {
 			}
 			// Get the next batch of logs
 			var ethLogs []*ethrpc.LogJSONRPC
-			rpcErr := es.c.backend.CallRPC(es.ctx, &ethLogs, filterRPCMethodToUse, filter)
+			rpcErr := es.c.rpc.CallRPC(es.ctx, &ethLogs, filterRPCMethodToUse, filter)
 			// If we fail to query we just retry - setting filter to nil if not found
 			if rpcErr != nil {
 				if etherrors.MapError(etherrors.FilterRPCMethods, rpcErr.Error()) == ffcapi.ErrorReasonNotFound {
@@ -596,7 +596,7 @@ func (es *eventStream) getBlockRangeEvents(ctx context.Context, ag *aggregatedLi
 		logFilterJSONRPCReq.Address = []*ethtypes.Address0xHex{ag.listeners[0].config.filters[0].Address}
 	}
 
-	rpcErr := es.c.backend.CallRPC(ctx, &ethLogs, "eth_getLogs", logFilterJSONRPCReq)
+	rpcErr := es.c.rpc.CallRPC(ctx, &ethLogs, "eth_getLogs", logFilterJSONRPCReq)
 	if rpcErr != nil {
 		return nil, rpcErr.Error()
 	}

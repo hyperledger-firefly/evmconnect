@@ -19,6 +19,7 @@ package ethereum
 import (
 	"github.com/hyperledger-firefly/common/pkg/config"
 	"github.com/hyperledger-firefly/common/pkg/wsclient"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
@@ -51,6 +52,7 @@ const (
 	HederaCompatibilityMode       = "hederaCompatibilityMode"
 	TraceTXForRevertReason        = "traceTXForRevertReason"
 	WebSocketsEnabled             = "ws.enabled"
+	RPCRoutingMode                = "rpcRoutingMode"
 	MaxAsyncBlockFetchConcurrency = "maxAsyncBlockFetchConcurrency"
 	UseGetBlockReceipts           = "useGetBlockReceipts"
 )
@@ -72,6 +74,7 @@ const (
 func InitConfig(conf config.Section) {
 	wsclient.InitConfig(conf)
 	conf.AddKnownKey(WebSocketsEnabled, false)
+	conf.AddKnownKey(RPCRoutingMode, string(ethrpc.RoutingModeAuto))
 	conf.AddKnownKey(BlockCacheSize, 250)
 	conf.AddKnownKey(ReceiptCacheEnabled, false)
 	conf.AddKnownKey(ReceiptCacheSize, 5000)

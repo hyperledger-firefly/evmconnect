@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger-firefly/common/pkg/ffresty"
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/retry"
 	"github.com/hyperledger-firefly/common/pkg/wsclient"
@@ -45,6 +44,14 @@ const testBlockFilterID2 = "block_filter_2"
 
 const shortDelay = 10 * time.Millisecond
 
+// utRPC wraps a mock backend in an HTTP-only JSON/RPC client, for tests that construct a
+// blockListener directly rather than through newTestBlockListener.
+func utRPC(t *testing.T, mRPC rpcbackend.RPC) ethrpc.Client {
+	rpc, err := ethrpc.NewClientWithBackends(t.Context(), ethrpc.RoutingModeHTTP, mRPC, nil)
+	require.NoError(t, err)
+	return rpc
+}
+
 func newTestBlockListener(t *testing.T, confSetup ...func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc)) (context.Context, *blockListener, *rpcbackendmocks.Backend, func()) {
 	ctx, cancelCtx := context.WithCancel(context.Background())
 
@@ -61,11 +68,13 @@ func newTestBlockListener(t *testing.T, confSetup ...func(conf *BlockListenerCon
 	for _, fn := range confSetup {
 		fn(conf, mRPC, cancelCtx)
 	}
-	ibl, err := NewBlockListenerSupplyBackend(ctx, &retry.Retry{
+	rpc, err := ethrpc.NewClientWithBackends(ctx, ethrpc.RoutingModeAuto, mRPC, nil)
+	require.NoError(t, err)
+	ibl, err := NewBlockListener(ctx, &retry.Retry{
 		InitialDelay: shortDelay,
 		MaximumDelay: 50 * time.Millisecond,
 		Factor:       2.0,
-	}, conf, mRPC, nil)
+	}, conf, rpc)
 	require.NoError(t, err)
 
 	require.Equal(t, conf.MonitoredHeadLength, ibl.GetMonitoredHeadLength())
@@ -227,7 +236,7 @@ func TestBlockListenerConstructorFailMonitoredHeadLength(t *testing.T) {
 	_, err := NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
 		BlockCacheSize:      -1,
 		MonitoredHeadLength: -1,
-	}, &ffresty.Config{}, &wsclient.WSConfig{})
+	}, nil)
 	require.Regexp(t, "FF23072", err)
 }
 
@@ -235,7 +244,7 @@ func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
 	_, err := NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
 		BlockCacheSize:      -1,
 		MonitoredHeadLength: 1,
-	}, &ffresty.Config{}, &wsclient.WSConfig{})
+	}, nil)
 	require.Regexp(t, "FF23040", err)
 
 	_, err = NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
@@ -243,7 +252,7 @@ func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
 		MonitoredHeadLength: 1,
 		ReceiptCacheEnabled: true,
 		ReceiptCacheSize:    -1,
-	}, &ffresty.Config{}, &wsclient.WSConfig{})
+	}, nil)
 	require.Regexp(t, "FF23040", err)
 }
 
@@ -415,10 +424,16 @@ func TestBlockListenerWSShoulderTap(t *testing.T) {
 	})
 
 	ctx, bl, _, done := newTestBlockListener(t)
-	bl.wsBackend = rpcbackend.NewWSRPCClient(&wsclient.WSConfig{
+	// Swap in a client with a real WebSocket pointed at the test server. Auto mode, so the
+	// chain queries below are the ones that must arrive over the WebSocket - the HTTP mock
+	// has no expectations set, so a call landing there fails the test.
+	mHTTP := &rpcbackendmocks.Backend{}
+	rpc, err := ethrpc.NewClientWithBackends(ctx, ethrpc.RoutingModeAuto, mHTTP, rpcbackend.NewWSRPCClient(&wsclient.WSConfig{
 		HTTPURL:                url,
 		InitialConnectAttempts: 0,
-	})
+	}))
+	require.NoError(t, err)
+	bl.rpc = rpc
 	svrDone := make(chan struct{})
 
 	pingerDone := make(chan struct{})
@@ -1344,9 +1359,6 @@ func TestBlockListenerWaitNextIterationTap(t *testing.T) {
 
 func TestWaitUntilStartedCancelledCtx(t *testing.T) {
 	_, bl, _, done := newTestBlockListener(t)
-
-	bl.UTSetBackend(nil)
-	require.Nil(t, bl.GetBackend())
 
 	cancelledFgCtx, cancelCtx := context.WithCancel(context.Background())
 	cancelCtx()

@@ -31,7 +31,7 @@ func (c *ethConnector) AddressBalance(ctx context.Context, req *ffcapi.AddressBa
 	if blockTag == "" {
 		blockTag = "latest"
 	}
-	rpcErr := c.backend.CallRPC(ctx, &addressBalance, "eth_getBalance", req.Address, blockTag)
+	rpcErr := c.rpc.CallRPC(ctx, &addressBalance, "eth_getBalance", req.Address, blockTag)
 	if rpcErr != nil {
 		return nil, "", rpcErr.Error()
 	}

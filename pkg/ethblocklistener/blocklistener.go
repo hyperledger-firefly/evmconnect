@@ -23,13 +23,11 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/hyperledger-firefly/common/pkg/ffresty"
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
 	"github.com/hyperledger-firefly/common/pkg/log"
 	"github.com/hyperledger-firefly/common/pkg/metric"
 	"github.com/hyperledger-firefly/common/pkg/retry"
-	"github.com/hyperledger-firefly/common/pkg/wsclient"
 	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
 	"github.com/hyperledger-firefly/evmconnect/internal/retryutil"
 	"github.com/hyperledger-firefly/evmconnect/pkg/etherrors"
@@ -88,8 +86,6 @@ type BlockListener interface {
 	FetchBlockReceiptsAsync(blockNumber uint64, blockHash ethtypes.HexBytes0xPrefix, cb func([]*ethrpc.TxReceiptJSONRPC, error))
 	SnapshotMonitoredHeadChain() []*ethrpc.BlockInfoJSONRPC // snapshot the whole view, with complete blocks, using the read-lock.
 	WaitClosed()
-	GetBackend() rpcbackend.RPC
-	UTSetBackend(rpcbackend.RPC)
 	InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error
 }
 
@@ -113,8 +109,7 @@ type BlockUpdateConsumer struct {
 type blockListener struct {
 	ctx            context.Context
 	retry          *retryutil.RetryWrapper
-	backend        rpcbackend.RPC
-	wsBackend      rpcbackend.WebSocketRPCClient // if configured the getting the blockheight will not complete until WS connects, overrides backend once connected
+	rpc            ethrpc.Client // shared with the rest of the connector - routes each call to HTTP or the WebSocket per its configured mode
 	listenLoopDone chan struct{}
 
 	isStarted bool
@@ -150,27 +145,18 @@ type blockListener struct {
 	metrics     metric.MetricsManager
 }
 
-func NewBlockListener(ctx context.Context, retry *retry.Retry, conf *BlockListenerConfig, httpConf *ffresty.Config, wsConf *wsclient.WSConfig) (bl BlockListener, err error) {
-	httpClient := ffresty.NewWithConfig(ctx, *httpConf)
-	var wsBackend rpcbackend.WebSocketRPCClient
-	if wsConf != nil {
-		wsBackend = rpcbackend.NewWSRPCClient(wsConf)
-	}
-	return NewBlockListenerSupplyBackend(ctx, retry, conf, rpcbackend.NewRPCClient(httpClient), wsBackend)
-}
-
-func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf *BlockListenerConfig, httpBackend rpcbackend.RPC, wsBackend rpcbackend.WebSocketRPCClient) (_ BlockListener, err error) {
+func NewBlockListener(ctx context.Context, retry *retry.Retry, conf *BlockListenerConfig, rpc ethrpc.Client) (_ BlockListener, err error) {
 	if conf.MaxAsyncBlockFetchConcurrency <= 0 {
 		conf.MaxAsyncBlockFetchConcurrency = 1
 	}
 	if conf.ChainTrackingMode == "" {
 		conf.ChainTrackingMode = ffcapi.ChainTrackingModeFull
 	}
+	ctx = log.WithLogFields(ctx, "role", "blocklistener")
 	bl := &blockListener{
-		ctx:                           log.WithLogFields(ctx, "role", "blocklistener"),
+		ctx:                           ctx,
 		retry:                         &retryutil.RetryWrapper{Retry: retry},
-		backend:                       httpBackend, // use the HTTP backend - might get overwritten by a connected websocket later
-		wsBackend:                     wsBackend,
+		rpc:                           rpc,
 		isStarted:                     false,
 		startDone:                     make(chan struct{}),
 		initialBlockHeightObtained:    make(chan struct{}),
@@ -198,14 +184,6 @@ func NewBlockListenerSupplyBackend(ctx context.Context, retry *retry.Retry, conf
 		}
 	}
 	return bl, nil
-}
-
-func (bl *blockListener) GetBackend() rpcbackend.RPC {
-	return bl.backend
-}
-
-func (bl *blockListener) UTSetBackend(backend rpcbackend.RPC) {
-	bl.backend = backend
 }
 
 func (bl *blockListener) GetMonitoredHeadLength() int {
@@ -270,34 +248,23 @@ func (bl *blockListener) newHeadsSubListener() {
 
 // getBlockHeightWithRetry keeps retrying attempting to get the initial block height until successful
 func (bl *blockListener) establishBlockHeightWithRetry() error {
-	wsConnected := false
 	return bl.retry.Do(bl.ctx, "get initial block height", func(_ int) (retry bool, err error) {
-		// If we have a WebSocket backend, then we connect it and switch over to using it
-		// (we accept an un-locked update here to backend, as the most important routine that's
-		// querying block state is the one we're called on)
-		if bl.wsBackend != nil {
-			if !wsConnected {
-				if err := bl.wsBackend.Connect(bl.ctx); err != nil {
-					log.L(bl.ctx).Warnf("WebSocket connection failed, blocking startup of block listener: %s", err)
-					return true, err
-				}
-				bl.backend = bl.wsBackend
-				// if we retry subscribe, we don't want to retry connect
-				wsConnected = true
+		// If a websocket is configured, we block startup until it is connected
+		// Note: The caller is welcome to connect the websocket before creating the block listener.
+		if bl.rpc.HasWebSocket() {
+			if err := bl.rpc.Connect(); err != nil {
+				log.L(bl.ctx).Warnf("WebSocket connection failed, blocking startup of block listener: %s", err)
+				return true, err
 			}
 			if bl.newHeadsSub == nil {
 				// Once subscribed the backend will keep us subscribed over reconnect
-				sub, rpcErr := bl.wsBackend.Subscribe(bl.ctx, "newHeads")
+				sub, rpcErr := bl.rpc.Subscribe(bl.ctx, "newHeads")
 				if rpcErr != nil {
 					return true, rpcErr.Error()
 				}
 				bl.newHeadsSub = sub
 				go bl.newHeadsSubListener()
 			}
-			// Ok all JSON/RPC from this point on uses our WS Backend, thus ensuring we're
-			// sticky to the same node that the WS is connected to when we're doing queries
-			// and building our cache.
-			bl.backend = bl.wsBackend
 		}
 
 		// Now get the block height
@@ -316,7 +283,7 @@ func (bl *blockListener) establishBlockHeightWithRetry() error {
 // state. Caller must not hold canonicalChainLock. The height the node reports is recorded on the target block height gauge.
 func (bl *blockListener) queryBlockHeightFromRPC() (uint64, error) {
 	var hexBlockHeight ethtypes.HexInteger
-	rpcErr := bl.backend.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
+	rpcErr := bl.rpc.CallRPC(bl.ctx, &hexBlockHeight, "eth_blockNumber")
 	if rpcErr != nil {
 		bl.incPollFailureMetric("eth_blockNumber")
 		return 0, rpcErr.Error()
@@ -382,7 +349,7 @@ func (bl *blockListener) listenLoop() {
 		}
 
 		if filter == "" {
-			err := bl.backend.CallRPC(bl.ctx, &filter, "eth_newBlockFilter")
+			err := bl.rpc.CallRPC(bl.ctx, &filter, "eth_newBlockFilter")
 			if err != nil {
 				log.L(bl.ctx).Errorf("Failed to establish new block filter: %s", err.Message)
 				bl.incPollFailureMetric("eth_newBlockFilter")
@@ -400,7 +367,7 @@ func (bl *blockListener) listenLoop() {
 			notifyPos = bl.reconcileCanonicalChain(seedBi)
 			seedBi = nil
 		} else {
-			rpcErr := bl.backend.CallRPC(bl.ctx, &blockHashes, "eth_getFilterChanges", filter)
+			rpcErr := bl.rpc.CallRPC(bl.ctx, &blockHashes, "eth_getFilterChanges", filter)
 			if rpcErr != nil {
 				if etherrors.MapError(etherrors.FilterRPCMethods, rpcErr.Error()) == ffcapi.ErrorReasonNotFound {
 					log.L(bl.ctx).Warnf("Block filter '%v' no longer valid. Recreating filter: %s", filter, rpcErr.Message)
@@ -839,10 +806,6 @@ func (bl *blockListener) WaitClosed() {
 	bl.consumerMux.Lock()
 	listenLoopDone := bl.listenLoopDone
 	bl.consumerMux.Unlock()
-	if bl.wsBackend != nil {
-		_ = bl.wsBackend.UnsubscribeAll(bl.ctx)
-		bl.wsBackend.Close()
-	}
 	if listenLoopDone != nil {
 		select {
 		case <-listenLoopDone:

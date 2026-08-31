@@ -240,8 +240,8 @@ func (l *listener) listenerCatchupLoop() {
 				}
 			} else {
 				log.L(ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d: %s", fromBlock, toBlock, err)
-				failCount++
 			}
+			failCount++ // for exponential backoff calculation
 			continue
 		}
 		log.L(ctx).Infof("Listener catchup fromBlock=%d toBlock=%d events=%d", fromBlock, toBlock, len(events))
