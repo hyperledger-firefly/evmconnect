@@ -70,7 +70,7 @@ func (c *ethConnector) gasEstimate(ctx context.Context, tx *ethsigner.Transactio
 
 	// Do the gas estimation
 	var gasEstimate ethtypes.HexInteger
-	rpcErr := c.backend.CallRPC(ctx, &gasEstimate, "eth_estimateGas", tx)
+	rpcErr := c.rpc.CallRPC(ctx, &gasEstimate, "eth_estimateGas", tx)
 	if rpcErr != nil {
 		if reason, revertErr := c.attemptProcessingRevertData(ctx, errors, rpcErr); revertErr != nil {
 			return nil, reason, revertErr

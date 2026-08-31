@@ -38,13 +38,11 @@ import (
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/signer/pkg/abi"
 	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
-	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 type ethConnector struct {
-	backend           rpcbackend.Backend
-	wsBackend         rpcbackend.WebSocketRPCClient
+	rpc               ethrpc.Client
 	chainTrackingMode ffcapi.ChainTrackingMode
 
 	serializer                 *abi.Serializer
@@ -68,18 +66,48 @@ type ethConnector struct {
 type Connector interface {
 	ffcapi.API
 
-	// RPC returns the http JSON/RPC client
-	RPC() rpcbackend.RPC
-
-	// WSRPC returns the websocket JSON/RPC client
-	// NOTE: websocket client will be nil if websockets are not enabled
-	WSRPC() rpcbackend.WebSocketRPCClient
+	// RPC returns the JSON/RPC client used for everything the connector does. It owns both
+	// the HTTP connection pool and the WebSocket (when enabled), and routes each call to one
+	// of them based on the method name and the configured routing mode.
+	RPC() ethrpc.Client
 
 	// Get the high level block listener functionality, which provides a view of the head of the chain
 	BlockListener() ethblocklistener.BlockListener
 }
 
+// NewEthereumConnector builds the JSON/RPC client from configuration, and the connector over it.
 func NewEthereumConnector(ctx context.Context, conf config.Section) (cc Connector, err error) {
+	if conf.GetString(ffresty.HTTPConfigURL) == "" {
+		return nil, i18n.NewError(ctx, msgs.MsgMissingBackendURL)
+	}
+
+	var wsConf *wsclient.WSConfig
+	if conf.GetBool(WebSocketsEnabled) {
+		if wsConf, err = wsclient.GenerateConfig(ctx, conf); err != nil {
+			return nil, err
+		}
+	}
+	httpConf, err := ffresty.GenerateConfig(ctx, conf)
+	if err != nil {
+		return nil, err
+	}
+
+	rpc, err := ethrpc.NewClient(ctx, &ethrpc.Config{
+		RoutingMode:           ethrpc.RoutingMode(conf.GetString(RPCRoutingMode)),
+		HTTP:                  httpConf,
+		WS:                    wsConf,
+		MaxConcurrentRequests: conf.GetInt64(MaxConcurrentRequests),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return NewEthereumConnectorWithRPC(ctx, conf, rpc)
+}
+
+// NewEthereumConnectorWithRPC builds the connector over a pre-constructed JSON/RPC client.
+// The caller owns closing the client - see ethConnector.WaitClosed.
+func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc ethrpc.Client) (cc Connector, err error) {
 
 	chainTrackingMode := ffcapi.ChainTrackingMode(conf.GetString(ChainTrackingMode))
 	if chainTrackingMode == "" {
@@ -90,6 +118,7 @@ func NewEthereumConnector(ctx context.Context, conf config.Section) (cc Connecto
 	}
 
 	c := &ethConnector{
+		rpc:                        rpc,
 		eventStreams:               make(map[fftypes.UUID]*eventStream),
 		catchupPageSize:            conf.GetInt64(EventsCatchupPageSize),
 		catchupThreshold:           conf.GetInt64(EventsCatchupThreshold),
@@ -115,39 +144,11 @@ func NewEthereumConnector(ctx context.Context, conf config.Section) (cc Connecto
 		return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "transaction")
 	}
 
-	if conf.GetString(ffresty.HTTPConfigURL) == "" {
-		return nil, i18n.NewError(ctx, msgs.MsgMissingBackendURL)
-	}
 	c.gasEstimationFactor = big.NewFloat(conf.GetFloat64(ConfigGasEstimationFactor))
 
 	c.catchupDownscaleRegex, err = regexp.Compile(conf.GetString(EventsCatchupDownscaleRegex))
 	if err != nil {
 		return nil, i18n.WrapError(ctx, err, msgs.MsgInvalidRegex, c.catchupDownscaleRegex)
-	}
-
-	var wsConf *wsclient.WSConfig
-	var httpConf *ffresty.Config
-	if conf.GetBool(WebSocketsEnabled) {
-		// If websockets are enabled, then they are used selectively (block listening/query)
-		// not as a full replacement for HTTP.
-		wsConf, err = wsclient.GenerateConfig(ctx, conf)
-	}
-
-	if err == nil {
-		httpConf, err = ffresty.GenerateConfig(ctx, conf)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	httpClient := ffresty.NewWithConfig(ctx, *httpConf)
-	c.backend = rpcbackend.NewRPCClientWithOption(httpClient, rpcbackend.RPCClientOptions{
-		MaxConcurrentRequest: conf.GetInt64(MaxConcurrentRequests),
-	})
-
-	if wsConf != nil {
-		c.wsBackend = rpcbackend.NewWSRPCClient(wsConf)
 	}
 
 	c.serializer = abi.NewSerializer().SetByteSerializer(abi.HexByteSerializer0xPrefix)
@@ -169,7 +170,7 @@ func NewEthereumConnector(ctx context.Context, conf config.Section) (cc Connecto
 		return name
 	})
 
-	if c.blockListener, err = ethblocklistener.NewBlockListenerSupplyBackend(ctx, c.retry.Retry, &ethblocklistener.BlockListenerConfig{
+	if c.blockListener, err = ethblocklistener.NewBlockListener(ctx, c.retry.Retry, &ethblocklistener.BlockListenerConfig{
 		BlockPollingInterval:          conf.GetDuration(BlockPollingInterval),
 		MonitoredHeadLength:           int(c.checkpointBlockGap),
 		HederaCompatibilityMode:       conf.GetBool(HederaCompatibilityMode),
@@ -179,19 +180,15 @@ func NewEthereumConnector(ctx context.Context, conf config.Section) (cc Connecto
 		MaxAsyncBlockFetchConcurrency: conf.GetInt(MaxAsyncBlockFetchConcurrency),
 		UseGetBlockReceipts:           conf.GetBool(UseGetBlockReceipts),
 		ChainTrackingMode:             c.chainTrackingMode,
-	}, c.backend, c.wsBackend); err != nil {
+	}, c.rpc); err != nil {
 		return nil, err
 	}
 
 	return c, nil
 }
 
-func (c *ethConnector) RPC() rpcbackend.RPC {
-	return c.backend
-}
-
-func (c *ethConnector) WSRPC() rpcbackend.WebSocketRPCClient {
-	return c.wsBackend
+func (c *ethConnector) RPC() ethrpc.Client {
+	return c.rpc
 }
 
 func (c *ethConnector) BlockListener() ethblocklistener.BlockListener {
@@ -205,6 +202,9 @@ func (c *ethConnector) WaitClosed() {
 	}
 	for _, s := range c.eventStreams {
 		<-s.streamLoopDone
+	}
+	if c.rpc != nil {
+		c.rpc.Close()
 	}
 }
 

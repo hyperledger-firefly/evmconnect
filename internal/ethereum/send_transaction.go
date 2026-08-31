@@ -37,7 +37,7 @@ func (c *ethConnector) TransactionSend(ctx context.Context, req *ffcapi.Transact
 	var rpcError *rpcbackend.RPCError
 	var txHash ethtypes.HexBytes0xPrefix
 	if req.PreSigned {
-		rpcError = c.backend.CallRPC(ctx, &txHash, "eth_sendRawTransaction", req.TransactionData)
+		rpcError = c.rpc.CallRPC(ctx, &txHash, "eth_sendRawTransaction", req.TransactionData)
 	} else {
 		txData, err := hex.DecodeString(strings.TrimPrefix(req.TransactionData, "0x"))
 		if err != nil {
@@ -53,7 +53,7 @@ func (c *ethConnector) TransactionSend(ctx context.Context, req *ffcapi.Transact
 		if err != nil {
 			return nil, ffcapi.ErrorReasonInvalidInputs, err
 		}
-		rpcError = c.backend.CallRPC(ctx, &txHash, "eth_sendTransaction", tx)
+		rpcError = c.rpc.CallRPC(ctx, &txHash, "eth_sendTransaction", tx)
 	}
 
 	if rpcError == nil && len(txHash) != 32 {

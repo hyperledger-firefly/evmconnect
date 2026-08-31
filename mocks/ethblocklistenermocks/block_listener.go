@@ -10,7 +10,6 @@ import (
 	ethblocklistener "github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
 	ethrpc "github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	ethtypes "github.com/hyperledger-firefly/signer/pkg/ethtypes"
-	rpcbackend "github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -27,26 +26,6 @@ func (_m *BlockListener) AddConsumer(ctx context.Context, c *ethblocklistener.Bl
 // FetchBlockReceiptsAsync provides a mock function with given fields: blockNumber, blockHash, cb
 func (_m *BlockListener) FetchBlockReceiptsAsync(blockNumber uint64, blockHash ethtypes.HexBytes0xPrefix, cb func([]*ethrpc.TxReceiptJSONRPC, error)) {
 	_m.Called(blockNumber, blockHash, cb)
-}
-
-// GetBackend provides a mock function with no fields
-func (_m *BlockListener) GetBackend() rpcbackend.RPC {
-	ret := _m.Called()
-
-	if len(ret) == 0 {
-		panic("no return value specified for GetBackend")
-	}
-
-	var r0 rpcbackend.RPC
-	if rf, ok := ret.Get(0).(func() rpcbackend.RPC); ok {
-		r0 = rf()
-	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(rpcbackend.RPC)
-		}
-	}
-
-	return r0
 }
 
 // GetBlockGasLimit provides a mock function with no fields
@@ -405,11 +384,6 @@ func (_m *BlockListener) SnapshotMonitoredHeadChain() []*ethrpc.BlockInfoJSONRPC
 	}
 
 	return r0
-}
-
-// UTSetBackend provides a mock function with given fields: _a0
-func (_m *BlockListener) UTSetBackend(_a0 rpcbackend.RPC) {
-	_m.Called(_a0)
 }
 
 // WaitClosed provides a mock function with no fields

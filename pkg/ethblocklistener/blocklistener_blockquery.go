@@ -60,7 +60,7 @@ func (bl *blockListener) GetTransactionReceipt(ctx context.Context, txHash strin
 	if receipt, ok := bl.getCachedTransactionReceipt(txHash); ok {
 		return receipt, nil
 	}
-	rpcErr := bl.backend.CallRPC(ctx, &ethReceipt, "eth_getTransactionReceipt", txHash)
+	rpcErr := bl.rpc.CallRPC(ctx, &ethReceipt, "eth_getTransactionReceipt", txHash)
 	if rpcErr != nil || ethReceipt == nil {
 		var err error
 		if rpcErr != nil {
@@ -116,7 +116,7 @@ func (bl *blockListener) GetBlockInfoByHash(ctx context.Context, hash0xString st
 
 // Does not use cache, but will add to cache
 func (bl *blockListener) GetEVMBlockWithTxHashesByHash(ctx context.Context, hash0xString string) (b *ethrpc.EVMBlockWithTxHashesJSONRPC, err error) {
-	rpcErr := bl.backend.CallRPC(ctx, &b, "eth_getBlockByHash", hash0xString, false /* only the txn hashes */)
+	rpcErr := bl.rpc.CallRPC(ctx, &b, "eth_getBlockByHash", hash0xString, false /* only the txn hashes */)
 	if rpcErr != nil {
 		return nil, rpcErr.Error()
 	}
@@ -128,7 +128,7 @@ func (bl *blockListener) GetEVMBlockWithTxHashesByHash(ctx context.Context, hash
 
 // Does not use cache, but will add to cache
 func (bl *blockListener) GetEVMBlockWithTransactionsByHash(ctx context.Context, hash0xString string) (b *ethrpc.EVMBlockWithTransactionsJSONRPC, err error) {
-	rpcErr := bl.backend.CallRPC(ctx, &b, "eth_getBlockByHash", hash0xString, true /* full blocks */)
+	rpcErr := bl.rpc.CallRPC(ctx, &b, "eth_getBlockByHash", hash0xString, true /* full blocks */)
 	if rpcErr != nil {
 		return nil, rpcErr.Error()
 	}
@@ -140,7 +140,7 @@ func (bl *blockListener) GetEVMBlockWithTransactionsByHash(ctx context.Context, 
 
 // Does not use cache, but will add to cache
 func (bl *blockListener) GetEVMBlockWithTxHashesByNumber(ctx context.Context, numberLookup string) (b *ethrpc.EVMBlockWithTxHashesJSONRPC, err error) {
-	rpcErr := bl.backend.CallRPC(ctx, &b, "eth_getBlockByNumber", numberLookup, false /* only the txn hashes */)
+	rpcErr := bl.rpc.CallRPC(ctx, &b, "eth_getBlockByNumber", numberLookup, false /* only the txn hashes */)
 	if rpcErr != nil {
 		return nil, rpcErr.Error()
 	}
@@ -152,7 +152,7 @@ func (bl *blockListener) GetEVMBlockWithTxHashesByNumber(ctx context.Context, nu
 
 // Does not use cache, but will add to cache
 func (bl *blockListener) GetEVMBlockWithTransactionsByNumber(ctx context.Context, numberLookup string) (b *ethrpc.EVMBlockWithTransactionsJSONRPC, err error) {
-	rpcErr := bl.backend.CallRPC(ctx, &b, "eth_getBlockByNumber", numberLookup, true /* full blocks */)
+	rpcErr := bl.rpc.CallRPC(ctx, &b, "eth_getBlockByNumber", numberLookup, true /* full blocks */)
 	if rpcErr != nil {
 		return nil, rpcErr.Error()
 	}

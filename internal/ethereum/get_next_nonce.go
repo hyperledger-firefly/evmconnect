@@ -27,7 +27,7 @@ import (
 func (c *ethConnector) NextNonceForSigner(ctx context.Context, req *ffcapi.NextNonceForSignerRequest) (*ffcapi.NextNonceForSignerResponse, ffcapi.ErrorReason, error) {
 
 	var txnCount ethtypes.HexInteger
-	rpcErr := c.backend.CallRPC(ctx, &txnCount, "eth_getTransactionCount", req.Signer, "pending")
+	rpcErr := c.rpc.CallRPC(ctx, &txnCount, "eth_getTransactionCount", req.Signer, "pending")
 	if rpcErr != nil {
 		return nil, "", rpcErr.Error()
 	}

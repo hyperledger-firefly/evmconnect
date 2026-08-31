@@ -91,7 +91,7 @@ func (c *ethConnector) callTransaction(ctx context.Context, tx *ethsigner.Transa
 	if blockNumber != nil {
 		blockNumberStr = *blockNumber
 	}
-	rpcErr := c.backend.CallRPC(ctx, &outputData, "eth_call", tx, blockNumberStr)
+	rpcErr := c.rpc.CallRPC(ctx, &outputData, "eth_call", tx, blockNumberStr)
 	if rpcErr != nil {
 		if reason, revertErr := c.attemptProcessingRevertData(ctx, errors, rpcErr); revertErr != nil {
 			return nil, reason, revertErr

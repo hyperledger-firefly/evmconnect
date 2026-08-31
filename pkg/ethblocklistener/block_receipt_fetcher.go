@@ -61,7 +61,7 @@ func (brr *blockReceiptRequest) run() {
 		}
 		brr.cb(receipts, err)
 	}()
-	rpc := brr.bl.backend
+	rpc := brr.bl.rpc
 
 	if brr.bl.UseGetBlockReceipts {
 		// just need to make a single call to get all the receipts

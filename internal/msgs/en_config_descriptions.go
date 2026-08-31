@@ -29,6 +29,7 @@ var ffc = func(key, translation string, fieldType string) i18n.ConfigMessageKey 
 var (
 	_ = ffc("config.connector.url", "URL of JSON/RPC endpoint for the Ethereum node/gateway", "string")
 	_ = ffc("config.connector.ws.enabled", "When true a WebSocket is established for block listening, in addition to the HTTP RPC connections used for other functions", i18n.BooleanType)
+	_ = ffc("config.connector.rpcRoutingMode", "Which connection JSON/RPC calls are made on when a WebSocket is enabled. 'auto' routes node-sticky chain queries (blocks, logs, filters, receipts) to the WebSocket and stateless calls (submission, gas, balance) to the HTTP connection pool. 'ws' routes everything to the WebSocket. 'http' routes everything to the HTTP connection pool, leaving the WebSocket to carry only the newHeads subscription. 'legacy' reproduces the routing used before this setting existed, where only the block listener used the WebSocket", "http,ws,auto,legacy")
 	_ = ffc("config.connector.dataFormat", "Configure the JSON data format for query output and events", "map,flat_array,self_describing")
 	_ = ffc("config.connector.gasEstimationFactor", "The factor to apply to the gas estimation to determine the gas limit", i18n.FloatType)
 	_ = ffc("config.connector.blockCacheSize", "Maximum of blocks to hold in the block info cache", i18n.IntType)

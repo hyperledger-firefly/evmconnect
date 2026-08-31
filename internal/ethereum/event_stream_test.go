@@ -996,7 +996,7 @@ func TestStreamCleanupFilterOK(t *testing.T) {
 	es := &eventStream{
 		ctx: context.Background(),
 		c: &ethConnector{
-			backend: mRPC,
+			rpc: utRPC(t, mRPC),
 		},
 	}
 
@@ -1015,7 +1015,7 @@ func TestStreamCleanupFilterFailLog(t *testing.T) {
 	es := &eventStream{
 		ctx: context.Background(),
 		c: &ethConnector{
-			backend: mRPC,
+			rpc: utRPC(t, mRPC),
 		},
 	}
 

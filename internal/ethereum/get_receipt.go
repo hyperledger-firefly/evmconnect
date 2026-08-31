@@ -73,7 +73,7 @@ func (c *ethConnector) getTransactionInfo(ctx context.Context, hash ethtypes.Hex
 		return cached.(*ethrpc.TxInfoJSONRPC), nil
 	}
 
-	rpcErr := c.backend.CallRPC(ctx, &txInfo, "eth_getTransactionByHash", hash)
+	rpcErr := c.rpc.CallRPC(ctx, &txInfo, "eth_getTransactionByHash", hash)
 	var err error
 	if rpcErr != nil {
 		err = rpcErr.Error()
@@ -108,7 +108,7 @@ func (c *ethConnector) getErrorInfo(ctx context.Context, transactionHash string,
 			log.L(ctx).Trace("No revert reason for the failed transaction found in the receipt. Calling debug_traceTransaction to retrieve it.")
 			// Attempt to get the return value of the transaction - not possible on all RPC endpoints
 			var debugTrace *txDebugTrace
-			traceErr := c.backend.CallRPC(ctx, &debugTrace, "debug_traceTransaction", transactionHash)
+			traceErr := c.rpc.CallRPC(ctx, &debugTrace, "debug_traceTransaction", transactionHash)
 			if traceErr != nil {
 				msg := i18n.NewError(ctx, msgs.MsgUnableToCallDebug, traceErr).Error()
 				return nil, &msg
@@ -171,7 +171,7 @@ func (c *ethConnector) TransactionReceipt(ctx context.Context, req *ffcapi.Trans
 
 	// Get the receipt in the back-end JSON/RPC format
 	var ethReceipt *ethrpc.TxReceiptJSONRPC
-	rpcErr := c.backend.CallRPC(ctx, &ethReceipt, "eth_getTransactionReceipt", req.TransactionHash)
+	rpcErr := c.rpc.CallRPC(ctx, &ethReceipt, "eth_getTransactionReceipt", req.TransactionHash)
 	if rpcErr != nil {
 		return nil, "", rpcErr.Error()
 	}
