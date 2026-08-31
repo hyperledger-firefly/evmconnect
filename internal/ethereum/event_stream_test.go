@@ -1302,7 +1302,7 @@ func TestLeadGroupDeliverEventsGetLogsMode(t *testing.T) {
 	}
 
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
-		conf.Set(EventsHeadTrackingMode, string(HeadTrackingModeClientOnly))
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
@@ -1410,7 +1410,7 @@ func TestLeadGroupGetLogsRetry(t *testing.T) {
 		},
 	}
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
-		conf.Set(EventsHeadTrackingMode, string(HeadTrackingModeClientOnly))
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
 	})
 
 	retried := make(chan struct{})
@@ -1718,7 +1718,7 @@ func TestLeadGroupGetLogsExitDuringDispatch(t *testing.T) {
 	}
 
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
-		conf.Set(EventsHeadTrackingMode, string(HeadTrackingModeClientOnly))
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)

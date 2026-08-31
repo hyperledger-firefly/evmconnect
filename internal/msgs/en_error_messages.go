@@ -95,5 +95,5 @@ var (
 	MsgInvalidRPCRoutingMode                    = ffe("FF23075", "Invalid JSON/RPC routing mode '%s': must be 'http', 'ws', 'auto' or 'legacy'")
 	MsgWebSocketNotConfigured                   = ffe("FF23076", "A WebSocket connection is not configured")
 	MsgRPCClientClosed                          = ffe("FF23077", "The JSON/RPC client is closed")
-	MsgInvalidHeadTrackingMode                  = ffe("FF23078", "Invalid head tracking mode '%s': must be 'server-filter' or 'client-only'")
+	MsgInvalidFilterPollingMode                 = ffe("FF23078", "Invalid filter polling mode '%s': must be 'server' or 'client'")
 )

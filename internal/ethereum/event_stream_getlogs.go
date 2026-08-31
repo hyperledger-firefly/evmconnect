@@ -27,7 +27,7 @@ import (
 )
 
 // getLogsPollState is the in-memory client-side filtering position for the getLogs steady state
-// (events.headTrackingMode: getLogs). As well as the next block to poll, we keep a sparse record
+// (events.filterPollingMode: getLogs). As well as the next block to poll, we keep a sparse record
 // of the (number, hash) of blocks we have already polled that are still within the block listener's
 // monitored (re-org unstable) window, so that when a re-org happens behind our poll position we can
 // find the earliest block that diverged and rewind to exactly there - rather than re-delivering the
@@ -103,7 +103,7 @@ func blockHashInHeadChain(headChain []*ethrpc.BlockInfoJSONRPC, blockNumber int6
 }
 
 // leadGroupSteadyStateGetLogs is the alternative steady state to leadGroupSteadyState, selected with
-// events.headTrackingMode: getLogs. Instead of establishing a node-side filter, we track our own
+// events.filterPollingMode: getLogs. Instead of establishing a node-side filter, we track our own
 // in-memory poll position and page forwards with stateless eth_getLogs range queries.
 //
 // The listener HWM (scan position used for the restart checkpoint) trails checkpointBlockGap behind

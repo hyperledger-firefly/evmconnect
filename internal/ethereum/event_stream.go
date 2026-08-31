@@ -502,7 +502,7 @@ func (es *eventStream) streamLoop() {
 		// We then transition to our steady state, filtering from the front of the chain.
 		// But we might fall behind and need to go back to the catchup mode.
 		var exiting bool
-		if es.c.eventHeadTrackingMode == HeadTrackingModeClientOnly {
+		if es.c.eventFilterPollingMode == FilterPollingModeClient {
 			exiting = es.leadGroupSteadyStateGetLogs()
 		} else {
 			exiting = es.leadGroupSteadyState()

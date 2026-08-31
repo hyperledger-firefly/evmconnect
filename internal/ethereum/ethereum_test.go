@@ -105,11 +105,11 @@ func TestConnectorInit(t *testing.T) {
 
 	conf.Set(RPCRoutingMode, ethrpc.RoutingModeAuto)
 	conf.Set(ChainTrackingMode, "")
-	conf.Set(EventsHeadTrackingMode, "wrong")
+	conf.Set(EventsFilterPollingMode, "wrong")
 	_, err = NewEthereumConnector(context.Background(), conf)
 	assert.Regexp(t, "FF23078.*wrong", err)
 
-	conf.Set(EventsHeadTrackingMode, string(HeadTrackingModeClientOnly))
+	conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
 	conf.Set(WebSocketsEnabled, true)
 	conf.Set(EventsCatchupThreshold, 1)
 	conf.Set(EventsCatchupPageSize, 500)
