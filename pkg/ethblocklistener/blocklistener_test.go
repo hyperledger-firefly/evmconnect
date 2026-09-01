@@ -133,9 +133,13 @@ func mockInitialBlockHeight(mRPC *rpcbackendmocks.Backend, height uint64) *mock.
 	}).Once()
 }
 
-// mockSeedBlockNotFound mocks eth_getBlockByNumber at seedHeight returning nil (block not found).
+// mockSeedBlockNotFound mocks one eth_getBlockByNumber at seedHeight returning nil (block not found).
 func mockSeedBlockNotFound(mRPC *rpcbackendmocks.Backend, seedHeight uint64) *mock.Call {
 	return mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", hexNumber(seedHeight), false).Return(nil).Once()
+}
+
+func mockSeedBlockNotFoundMaybe(mRPC *rpcbackendmocks.Backend, seedHeight uint64) *mock.Call {
+	return mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", hexNumber(seedHeight), false).Return(nil).Maybe()
 }
 
 // mockSeedBlock mocks eth_getBlockByNumber at height returning a block with the given hash.
@@ -259,7 +263,7 @@ func TestBlockListenerStartGettingHighestBlockRetry(t *testing.T) {
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").
 		Return(&rpcbackend.RPCError{Message: "pop"}).Once()
 	mockInitialBlockHeight(mRPC, 12345)
-	mockSeedBlockNotFound(mRPC, 12345-(50-1)).Maybe()
+	mockSeedBlockNotFoundMaybe(mRPC, 12345-(50-1))
 	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
 	mockFilterChangesEmpty(mRPC).Maybe()
 
@@ -1412,7 +1416,7 @@ func TestGetHighestBlockInfoBeforeHeadBlockSeen(t *testing.T) {
 	_, bl, mRPC, done := newTestBlockListener(t)
 
 	mockInitialBlockHeight(mRPC, 500)
-	mockSeedBlockNotFound(mRPC, 500-(50-1)).Maybe()
+	mockSeedBlockNotFoundMaybe(mRPC, 500-(50-1))
 	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
 	mockFilterChangesEmpty(mRPC).Maybe()
 
@@ -1430,7 +1434,7 @@ func TestGetHighestBlockInfoReturnsHeadBlock(t *testing.T) {
 	_, bl, mRPC, done := newTestBlockListener(t)
 
 	mockInitialBlockHeight(mRPC, 123)
-	mockSeedBlockNotFound(mRPC, 123-(50-1)).Maybe()
+	mockSeedBlockNotFoundMaybe(mRPC, 123-(50-1))
 	mockNewBlockFilter(mRPC, testBlockFilterID1).Maybe()
 	mockFilterChangesEmpty(mRPC).Maybe()
 

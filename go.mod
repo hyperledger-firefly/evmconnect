@@ -9,7 +9,7 @@ require (
 	github.com/hashicorp/golang-lru v1.0.2
 	github.com/hyperledger-firefly/common v1.6.5
 	github.com/hyperledger-firefly/signer v1.2.1
-	github.com/hyperledger-firefly/transaction-manager v1.5.3-0.20260830174818-5e887b9fb103
+	github.com/hyperledger-firefly/transaction-manager v1.5.3
 	github.com/sirupsen/logrus v1.10.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1

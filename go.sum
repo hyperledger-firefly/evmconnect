@@ -109,8 +109,8 @@ github.com/hyperledger-firefly/common v1.6.5 h1:/LEY1LlXQEezLVnEzSj8Lq3WQ9Uh1qUX
 github.com/hyperledger-firefly/common v1.6.5/go.mod h1:h1LhJHfJYH7hTioyx0BsjSt5sDNsxhXVV1jDaKaBszU=
 github.com/hyperledger-firefly/signer v1.2.1 h1:YmnCfiOPhrP/6WIGt5KwV3wiDEI61k7h282MpagSNnI=
 github.com/hyperledger-firefly/signer v1.2.1/go.mod h1:qLBLnXZZHk83x68WLvDjx8q80+6lQzx57FPeRyI6jmo=
-github.com/hyperledger-firefly/transaction-manager v1.5.3-0.20260830174818-5e887b9fb103 h1:HCEyTQ0TyPKRCk+sU6wt72Y2qGQ4CHVyjWFGZoxiPVQ=
-github.com/hyperledger-firefly/transaction-manager v1.5.3-0.20260830174818-5e887b9fb103/go.mod h1:VlI9M+p6G4Z1btSyGIYSz/Jlz6LYfw8v35+g2jrRUSk=
+github.com/hyperledger-firefly/transaction-manager v1.5.3 h1:bnvwiVu6Jnj01MltTI9c7mqtwuWznVr33UDNbRH1oVU=
+github.com/hyperledger-firefly/transaction-manager v1.5.3/go.mod h1:VlI9M+p6G4Z1btSyGIYSz/Jlz6LYfw8v35+g2jrRUSk=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/jarcoal/httpmock v1.2.0 h1:gSvTxxFR/MEMfsGrvRbdfpRUMBStovlSRLw0Ep1bwwc=

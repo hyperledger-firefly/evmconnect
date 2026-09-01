@@ -555,6 +555,8 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 // markDetectedAndDispatch records the detection point then (importantly afterwards) pushes the event to FFTM
 func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ffcapi.ListenerEvent) (exiting bool) {
 	log.L(es.ctx).Debugf("Detected event %s", event.Event)
+
+	// ListenerID is set in filterEnrichEthLog and must be non-nil
 	ag.listenersByID[*event.Event.ID.ListenerID].markDetected(event.Checkpoint.(*listenerCheckpoint))
 	select {
 	case es.events <- event:
@@ -562,6 +564,7 @@ func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ff
 	case <-es.ctx.Done():
 		return true
 	}
+
 }
 
 func (es *eventStream) buildAggregatedListener(listeners []*listener) *aggregatedListener {
