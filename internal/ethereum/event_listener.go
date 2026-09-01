@@ -247,10 +247,7 @@ func (l *listener) listenerCatchupLoop() {
 		log.L(ctx).Infof("Listener catchup fromBlock=%d toBlock=%d events=%d", fromBlock, toBlock, len(events))
 
 		for _, event := range events {
-			log.L(ctx).Debugf("Detected event %s (listener catchup)", event.Event)
-			select {
-			case l.es.events <- event:
-			case <-l.es.ctx.Done():
+			if l.es.markDetectedAndDispatch(al, event) {
 				log.L(ctx).Infof("Listener catchup loop exiting as stream is stopping")
 				return
 			}
