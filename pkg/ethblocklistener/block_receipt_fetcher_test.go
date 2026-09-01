@@ -28,6 +28,7 @@ import (
 	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFetchBlockReceiptsAsyncOptimizedOk(t *testing.T) {
@@ -284,6 +285,34 @@ func TestReconcileConfirmationsForTransactionUsesCachedReceipt(t *testing.T) {
 	assert.NotNil(t, receipt)
 	assert.Equal(t, ethtypes.HexUint64(1977), receipt.BlockNumber)
 	mRPC.AssertNotCalled(t, "CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", mock.Anything)
+}
+
+func TestReceiptCacheDisabledAllEntryPointsNoop(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc) {
+		conf.ReceiptCacheEnabled = false
+	})
+	defer done()
+
+	require.Nil(t, bl.txReceiptCache)
+	bl.canonicalChain = createTestChain(1976, 1978)
+
+	txHash := "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6"
+	bl.storeReceiptsInCache([]*ethrpc.TxReceiptJSONRPC{
+		{TransactionHash: ethtypes.MustNewHexBytes0xPrefix(txHash)},
+	}, bl.getReceiptCacheGeneration())
+
+	// Nothing is stored, so nothing can be served from the cache
+	_, ok := bl.getCachedTransactionReceipt(txHash)
+	assert.False(t, ok)
+
+	// The reset and the two pre-fetch paths are all no-ops - the latter asserted by done(),
+	// as no receipt queries are mocked for the chain we put in place above
+	bl.resetReceiptCache()
+	bl.fetchAndCacheBlockReceipts(&ethrpc.BlockInfoJSONRPC{
+		Number: ethtypes.HexUint64(1977),
+		Hash:   generateTestHash(1977),
+	})
+	bl.refetchReceiptsForCanonicalChain()
 }
 
 func TestReceiptCacheEvictsWhenFull(t *testing.T) {
