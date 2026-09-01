@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
@@ -62,7 +63,7 @@ type eventStream struct {
 	mux            sync.Mutex
 	updateCount    int
 	listeners      map[fftypes.UUID]*listener
-	headBlock      int64
+	headBlock      atomic.Int64 // the stream's head position, -1 until established - atomic as it is read for listener catchup classification without the stream lock
 	streamLoopDone chan struct{}
 	catchup        bool
 }
@@ -74,6 +75,7 @@ type eventStream struct {
 type aggregatedListener struct {
 	signatureSet      []ethtypes.HexBytes0xPrefix // a list of unique topic[0] event signatures to listener for
 	listenersByTopic0 map[string][]*listener      // a map of all listeners that are interested in an event signature - they may not be interested in the event itself (depending on sub-selection)
+	listenersByID     map[fftypes.UUID]*listener  // a map of all listeners by ID, to resolve the listener that generated an event when dispatching it
 	listeners         []*listener                 // list of all listeners
 }
 
@@ -196,6 +198,15 @@ func (es *eventStream) removeEventListener(listenerID *fftypes.UUID) {
 	}
 }
 
+// catchupCeiling is the block position of the lead group. A listener in individual catchup
+// must never advance its HWM past this point - on reaching it, it joins the lead group
+// instead (see checkReadyForLeadPackOrRemoved). Returns false if the stream's head position
+// has not yet been established, in which case no catchup scanning can safely take place.
+func (es *eventStream) catchupCeiling() (int64, bool) {
+	headBlock := es.headBlock.Load()
+	return headBlock, headBlock >= 0
+}
+
 func (es *eventStream) rejoinLeadGroup(l *listener) {
 	l.es.mux.Lock()
 	defer l.es.mux.Unlock()
@@ -256,8 +267,8 @@ func (es *eventStream) leadGroupCatchup() bool {
 		// Determine the earliest block we need to poll from
 		fromBlock := int64(-1)
 		for _, l := range ag.listeners {
-			if fromBlock < 0 || l.hwmBlock < fromBlock {
-				fromBlock = l.hwmBlock
+			if lHWM := l.getHWMBlock(); fromBlock < 0 || lHWM < fromBlock {
+				fromBlock = lHWM
 			}
 		}
 
@@ -343,8 +354,8 @@ func (es *eventStream) leadGroupSteadyState() bool {
 				// Determine the earliest block we need to poll from
 				fromBlock := int64(-1)
 				for _, l := range ag.listeners {
-					if fromBlock < 0 || l.hwmBlock < fromBlock {
-						fromBlock = l.hwmBlock
+					if lHWM := l.getHWMBlock(); fromBlock < 0 || lHWM < fromBlock {
+						fromBlock = lHWM
 					}
 				}
 
@@ -402,9 +413,7 @@ func (es *eventStream) leadGroupSteadyState() bool {
 			}
 
 			// Update the head block to be the hwm block
-			es.mux.Lock()
-			es.headBlock = hwmBlock
-			es.mux.Unlock()
+			es.headBlock.Store(hwmBlock)
 		}
 
 		// Reset failure count if we reach here
@@ -427,19 +436,40 @@ func (es *eventStream) preStartProcessing() {
 		log.L(ctx).Warnf("Event stream closed before establishing block height")
 		return
 	}
+	// The lead group never advances past checkpointBlockGap behind the chain head, as those blocks
+	// are re-org unstable. We establish our head position on the same basis, so that a listener
+	// held in catchup clamps against a safe ceiling from the moment it is established.
+	safeHead := int64(chainHead) - es.c.checkpointBlockGap //nolint:gosec // convert to int64 to match the type of headBlock
+	if safeHead < 0 {
+		safeHead = 0
+	}
+	// Take the stream lock while we establish the head position - listeners can be added
+	// concurrently (the stream is externally visible before this routine runs)
+	es.mux.Lock()
+	headBlock := int64(-1)
 	for _, l := range es.listeners {
 		// During initial start we move the "head" block forwards to be the highest of all the initial streams
-		if l.hwmBlock > es.headBlock {
-			if l.hwmBlock > int64(chainHead) { //nolint:gosec // convert to int64 to match the type of headBlock
-				es.headBlock = int64(chainHead) //nolint:gosec // convert to int64 to match the type of headBlock
-			} else {
-				es.headBlock = l.hwmBlock
-			}
+		if lHWM := l.getHWMBlock(); lHWM > headBlock {
+			headBlock = lHWM
 		}
 	}
-
-	// Now we've done that, we can start all the listeners
+	if headBlock < 0 || headBlock > safeHead {
+		// Either there were no initial listeners, or they are all ahead of the safe point. Either way
+		// the head position is the safe point, so that listeners added later are classified against a
+		// real head position (a listener started while headBlock is unestablished is held in catchup -
+		// see checkReadyForLeadPackOrRemoved)
+		headBlock = safeHead
+	}
+	es.headBlock.Store(headBlock)
+	initialListeners := make([]*listener, 0, len(es.listeners))
 	for _, l := range es.listeners {
+		initialListeners = append(initialListeners, l)
+	}
+	es.mux.Unlock()
+
+	// Now we've done that, we can start all the listeners (startEventListener takes the stream
+	// lock itself, and is idempotent for any that were also started via EventListenerAdd)
+	for _, l := range initialListeners {
 		es.startEventListener(l)
 	}
 }
@@ -477,10 +507,7 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 		}
 	} else {
 		for _, event := range events {
-			log.L(es.ctx).Debugf("Detected event %s", event.Event)
-			select {
-			case es.events <- event:
-			case <-es.ctx.Done():
+			if es.markDetectedAndDispatch(ag, event) {
 				return true
 			}
 		}
@@ -495,12 +522,29 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 
 }
 
+// markDetectedAndDispatch records the detection point then (importantly afterwards) pushes the event to FFTM
+func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ffcapi.ListenerEvent) (exiting bool) {
+	log.L(es.ctx).Debugf("Detected event %s", event.Event)
+
+	// ListenerID is set in filterEnrichEthLog and must be non-nil
+	ag.listenersByID[*event.Event.ID.ListenerID].markDetected(event.Checkpoint.(*listenerCheckpoint))
+	select {
+	case es.events <- event:
+		return false
+	case <-es.ctx.Done():
+		return true
+	}
+
+}
+
 func (es *eventStream) buildAggregatedListener(listeners []*listener) *aggregatedListener {
 	ag := &aggregatedListener{
 		listeners:         listeners,
 		listenersByTopic0: make(map[string][]*listener),
+		listenersByID:     make(map[fftypes.UUID]*listener),
 	}
 	for _, l := range listeners {
+		ag.listenersByID[*l.id] = l
 		for _, f := range l.config.filters {
 			sigStr := f.Topic0.String()
 			topicListeners, existing := ag.listenersByTopic0[sigStr]
@@ -566,8 +610,10 @@ func (es *eventStream) getListenerHWM(ctx context.Context, listenerID *fftypes.U
 	if l == nil {
 		return nil, ffcapi.ErrorReasonNotFound, i18n.NewError(ctx, msgs.MsgListenerNotStarted, listenerID, es.id)
 	}
+	scanned, lastDetected := l.getHWM()
 	return &ffcapi.EventListenerHWMResponse{
-		Checkpoint: l.getHWMCheckpoint(),
-		Catchup:    l.catchup || es.catchup, // dirty read of whether the listener is in catchup, or the head group of the stream is in catchup
+		Checkpoint:   scanned,
+		LastDetected: lastDetected,
+		Catchup:      l.catchup || es.catchup, // dirty read of whether the listener is in catchup, or the head group of the stream is in catchup
 	}, "", nil
 }

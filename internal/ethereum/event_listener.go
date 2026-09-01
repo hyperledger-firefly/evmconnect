@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
@@ -59,8 +60,9 @@ type listener struct {
 	c               *ethConnector
 	es              *eventStream
 	ee              *eventEnricher
-	hwmMux          sync.Mutex // Protects checkpoint of an individual listener. May hold ES lock when taking this, must NOT attempt to obtain ES lock while holding this
-	hwmBlock        int64
+	hwmMux          sync.Mutex          // Protects hwmBlock and lastDetected. May hold ES lock when taking this, must NOT attempt to obtain ES lock while holding this
+	hwmBlock        int64               // the scan position - the block we have polled for events up to (exclusive)
+	lastDetected    *listenerCheckpoint // the checkpoint of the highest event we have pushed to FFTM - see ffcapi.EventListenerHWMResponse
 	config          listenerConfig
 	removed         bool
 	catchup         bool
@@ -120,28 +122,43 @@ func (l *listener) ensureHWM(ctx context.Context) error {
 func (l *listener) checkReadyForLeadPackOrRemoved(ctx context.Context) (bool, bool) {
 	l.hwmMux.Lock()
 	defer l.hwmMux.Unlock()
-	// We do a dirty read of the head block (unless the caller has locked the eventStream Mutex, which
-	// we support in the mutex hierarchy)
-	headBlock := l.es.headBlock
+	// The head block is atomic, as we cannot take the eventStream lock here (our caller may or
+	// may not already hold it in the mutex hierarchy)
+	headBlock := l.es.headBlock.Load()
 	blockGap := headBlock - l.hwmBlock
-	readyForLead := blockGap < l.c.catchupThreshold
+	readyForLead := headBlock >= 0 && blockGap < l.c.catchupThreshold
 	log.L(ctx).Debugf("Listener %s head=%d hwm=%d (gap=%d) readyForLead=%t", l.id, headBlock, l.hwmBlock, blockGap, readyForLead)
 	return readyForLead, l.removed
 }
 
-// getHWMCheckpoint gets the point the event polling is up to for this listener.
-// Note this intentionally does not account for dispatched events, as the parent framework ensures that
-// this checkpoint is only persisted when there are no events in-flight pending dispatch for this listener,
-// and the checkpoint for this listener is stale.
-func (l *listener) getHWMCheckpoint() *listenerCheckpoint {
+// getHWM returns under the hmwMux lock as consistent set of:
+// 1. Scan position - where event polling is up to, for detection of new events
+// 2. Last detected - the checkpoint of the highest event pushed to the FFTM channel (or nil)
+// See ffcapi.EventListenerHWMResponse for the contract defined by FFTM for these
+func (l *listener) getHWM() (scanned ffcapi.EventListenerCheckpoint, lastDetected ffcapi.EventListenerCheckpoint) {
 	l.hwmMux.Lock()
 	defer l.hwmMux.Unlock()
 	// Generate a checkpoint before the first transaction, in the high watermark block
-	log.L(l.es.ctx).Debugf("HWM checkpoint block for '%s': %d", l.id, l.hwmBlock)
-	return &listenerCheckpoint{
+	log.L(l.es.ctx).Debugf("HWM checkpoint block for '%s': %d (lastDetected=%+v)", l.id, l.hwmBlock, l.lastDetected)
+	scanned = &listenerCheckpoint{
 		Block:            l.hwmBlock,
 		TransactionIndex: -1,
 		LogIndex:         -1,
+	}
+	if l.lastDetected != nil {
+		lastDetected = l.lastDetected
+	}
+	return scanned, lastDetected
+}
+
+// markDetected records the checkpoint of an event, and must be called pushing the event to FFTM
+func (l *listener) markDetected(cp *listenerCheckpoint) {
+	l.hwmMux.Lock()
+	defer l.hwmMux.Unlock()
+	// Only ever move forwards - a re-detection (such as after a re-org, or a filter reset) must not
+	// lower the bar FFTM uses to decide the scan position is safe to record as a checkpoint.
+	if l.lastDetected == nil || l.lastDetected.LessThan(cp) {
+		l.lastDetected = cp
 	}
 }
 
@@ -151,6 +168,12 @@ func (l *listener) moveHWMForwards(hwmBlock int64) {
 	if hwmBlock > l.hwmBlock {
 		l.hwmBlock = hwmBlock // check against moving backwards
 	}
+}
+
+func (l *listener) getHWMBlock() int64 {
+	l.hwmMux.Lock()
+	defer l.hwmMux.Unlock()
+	return l.hwmBlock
 }
 
 // listenerCatchupLoop reads pages of blocks at a time, until it gets within the configured catchup-threshold
@@ -183,8 +206,27 @@ func (l *listener) listenerCatchupLoop() {
 			return
 		}
 
-		fromBlock := l.hwmBlock
-		toBlock := l.hwmBlock + l.c.catchupPageSize - 1
+		// Never advance our HWM past the position of the lead group - we must join it rather than
+		// scan past it, otherwise we mark the re-org unstable blocks it deliberately holds back
+		// from as already scanned, and can never re-detect events a re-org introduces into them.
+		headBlock, established := l.es.catchupCeiling()
+		fromBlock := l.getHWMBlock()
+		toBlock := fromBlock + l.c.catchupPageSize - 1
+		if established && toBlock >= headBlock {
+			toBlock = headBlock - 1 // the resulting HWM (toBlock+1) is at most headBlock
+		}
+		if !established || fromBlock > toBlock {
+			// Either the lead group's position is not yet established - in which case we are
+			// deliberately held in catchup (see checkReadyForLeadPackOrRemoved) - or we have caught
+			// up to it and are waiting to be classified as ready to join it. Either way, do not scan.
+			select {
+			case <-time.After(l.c.eventFilterPollingInterval):
+				continue
+			case <-ctx.Done():
+				log.L(ctx).Infof("Listener catchup loop exiting as stream is stopping")
+				return
+			}
+		}
 		events, err := l.es.getBlockRangeEvents(ctx, al, fromBlock, toBlock)
 		if err != nil {
 			if l.c.catchupDownscaleRegex.String() != "" && l.c.catchupDownscaleRegex.MatchString(err.Error()) {
@@ -205,10 +247,7 @@ func (l *listener) listenerCatchupLoop() {
 		log.L(ctx).Infof("Listener catchup fromBlock=%d toBlock=%d events=%d", fromBlock, toBlock, len(events))
 
 		for _, event := range events {
-			log.L(ctx).Debugf("Detected event %s (listener catchup)", event.Event)
-			select {
-			case l.es.events <- event:
-			case <-l.es.ctx.Done():
+			if l.es.markDetectedAndDispatch(al, event) {
 				log.L(ctx).Infof("Listener catchup loop exiting as stream is stopping")
 				return
 			}
@@ -224,9 +263,7 @@ func (l *listener) filterEnrichEthLog(ctx context.Context, f *eventFilter, metho
 	blockNumber := trimUint64(ethLog.BlockNumber.Uint64())
 	transactionIndex := trimUint64(ethLog.TransactionIndex.Uint64())
 	logIndex := trimUint64(ethLog.LogIndex.Uint64())
-	l.hwmMux.Lock()
-	hwmBlock := l.hwmBlock
-	l.hwmMux.Unlock()
+	hwmBlock := l.getHWMBlock()
 	if blockNumber < hwmBlock {
 		log.L(ctx).Debugf("Listener %s already delivered event '%s' hwm=%d", l.id, getEventProtoID(blockNumber, transactionIndex, logIndex), hwmBlock)
 		return nil, false, nil

@@ -40,10 +40,10 @@ func (c *ethConnector) EventStreamStart(ctx context.Context, req *ffcapi.EventSt
 		c:              c,
 		ctx:            req.StreamContext,
 		events:         req.EventStream,
-		headBlock:      -1,
 		listeners:      make(map[fftypes.UUID]*listener),
 		streamLoopDone: make(chan struct{}),
 	}
+	es.headBlock.Store(-1) // not yet established
 
 	// We add all the initial event listeners, checking for errors, before kicking off the streamLoop().
 	for _, il := range req.InitialListeners {

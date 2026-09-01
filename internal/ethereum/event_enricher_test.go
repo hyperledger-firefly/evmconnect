@@ -386,6 +386,62 @@ func TestEventEnricher_FilterEnrichEthLog_ChainIDQueryFail(t *testing.T) {
 	assert.Nil(t, ev)
 }
 
+func TestEventEnricher_FilterEnrichEthLog_ChainIDEmpty(t *testing.T) {
+	_, conn, mRPC, done := newTestConnector(t)
+	defer done()
+
+	// A node that returns an empty chain ID, without an error - so the connector reports itself as
+	// ready, but the chain ID we need for enrichment was never set
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "net_version", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = ""
+	}).Maybe()
+
+	// Unset chainID to force IsReady call
+	conn.chainID = ""
+	ee := &eventEnricher{
+		connector:     conn,
+		extractSigner: false,
+	}
+
+	var eventABI *abi.Entry
+	err := json.Unmarshal([]byte(`{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "name": "from", "type": "address"},
+			{"indexed": true, "name": "to", "type": "address"},
+			{"indexed": false, "name": "value", "type": "uint256"}
+		],
+		"name": "Transfer",
+		"type": "event"
+	}`), &eventABI)
+	assert.NoError(t, err)
+
+	topic0, err := eventABI.SignatureHashCtx(context.Background())
+	assert.NoError(t, err)
+	addr := ethtypes.MustNewAddress("0x112233445566778899aabbccddeeff0011223344")
+	filter := &eventFilter{
+		Topic0:  topic0,
+		Address: addr,
+		Event:   eventABI,
+	}
+
+	log := &ethrpc.LogJSONRPC{
+		Address:          addr,
+		Topics:           []ethtypes.HexBytes0xPrefix{topic0},
+		Data:             []byte{},
+		BlockNumber:      ethtypes.HexUint64(100),
+		TransactionIndex: ethtypes.HexUint64(1),
+		LogIndex:         ethtypes.HexUint64(0),
+		BlockHash:        ethtypes.HexBytes0xPrefix{},
+	}
+
+	ctx := context.Background()
+	ev, matched, _, err := ee.filterEnrichEthLog(ctx, filter, []*abi.Entry{eventABI}, log)
+	assert.Regexp(t, "FF23056", err)
+	assert.True(t, matched)
+	assert.Nil(t, ev)
+}
+
 func TestEventEnricher_FilterEnrichEthLog_BlockNotFound(t *testing.T) {
 	_, conn, mRPC, done := newTestConnector(t)
 	defer done()
