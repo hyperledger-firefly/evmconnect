@@ -158,11 +158,10 @@ func TestBlockListenerMetricsFullMode(t *testing.T) {
 
 	ctx, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
 		conf.BlockPollingInterval = 1 * time.Millisecond
-
 		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
-			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(1001)
+			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(1000)
 		})
-		mockSeedBlockNotFound(mRPC, 1001-uint64(conf.MonitoredHeadLength)+1)
+		mockSeedBlockNotFound(mRPC, 1000-uint64(conf.MonitoredHeadLength)+1)
 		mockNewBlockFilter(mRPC, testBlockFilterID1)
 		mockFilterChanges(mRPC, testBlockFilterID1, nil, blockHash1001).Once()
 		mockFilterChangesEmpty(mRPC)
@@ -180,7 +179,7 @@ func TestBlockListenerMetricsFullMode(t *testing.T) {
 	})
 
 	// The height the node reports, refreshed by the listen loop, and the head of the chain we've built
-	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 1001)
+	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 1000)
 	waitForGaugeMetric(t, registry, metricCanonicalBlockHeight, 1001)
 }
 
