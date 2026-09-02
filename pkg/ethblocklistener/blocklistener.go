@@ -56,6 +56,7 @@ type ConfirmationUpdateResult struct {
 	Confirmed                bool                       `json:"confirmed,omitempty"`      // when true, it means the confirmation list is complete and the transaction is confirmed
 	TargetConfirmationCount  uint64                     `json:"targetConfirmationCount"`  // the target number of confirmations for this reconcile request
 	CurrentConfirmationCount uint64                     `json:"currentConfirmationCount"` // the current number of confirmations for this reconcile request
+	Timestamp                *ethtypes.HexUint64        `json:"timestamp,omitempty"`      // the on-chain timestamp of the transaction's block - only populated in "full" chain tracking mode, since "light" mode never fetches a block
 }
 
 type BlockListenerConfig struct {

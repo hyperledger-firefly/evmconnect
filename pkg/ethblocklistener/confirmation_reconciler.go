@@ -64,6 +64,7 @@ func (bl *blockListener) ReconcileConfirmationsForTransaction(ctx context.Contex
 			// no support on fork detection in this mode from the connector although firefly transaction manager will inject `NewFork: true` if it detects a reduction in confirmationCount.
 			CurrentConfirmationCount: currentConfirmationCount,
 			TargetConfirmationCount:  targetConfirmationCount,
+			// Timestamp is intentionally left unset in light mode - the block is never fetched here, only the receipt.
 		}, txReceipt, nil
 	}
 
@@ -84,6 +85,7 @@ func (bl *blockListener) ReconcileConfirmationsForTransaction(ctx context.Contex
 	if confirmationUpdateResult != nil {
 		confirmationUpdateResult.TargetConfirmationCount = targetConfirmationCount
 		confirmationUpdateResult.CurrentConfirmationCount = uint64(len(confirmationUpdateResult.Confirmations)) - 1
+		confirmationUpdateResult.Timestamp = &txBlockInfo.Timestamp
 		// NOTE: This function does not do the full receipt decoding, for which there is a complex function for.
 		// The "Receipt" object is left empty (but the JSON/RPC receipt is return to the caller for enrichment)
 	}
