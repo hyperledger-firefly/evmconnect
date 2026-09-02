@@ -50,13 +50,13 @@ import (
 //
 //	`rebuilt` will be true if an invalid confirmation list is detected by the reconciliation process
 type ConfirmationUpdateResult struct {
-	Confirmations            []*ethrpc.MinimalBlockInfo `json:"confirmations,omitempty"`  // the confirmation list
-	Rebuilt                  bool                       `json:"rebuilt,omitempty"`        // when true, it means the existing confirmations contained invalid blocks, the new confirmations are rebuilt from scratch
-	NewFork                  bool                       `json:"newFork,omitempty"`        // when true, it means a new fork was detected based on the existing confirmations
-	Confirmed                bool                       `json:"confirmed,omitempty"`      // when true, it means the confirmation list is complete and the transaction is confirmed
-	TargetConfirmationCount  uint64                     `json:"targetConfirmationCount"`  // the target number of confirmations for this reconcile request
-	CurrentConfirmationCount uint64                     `json:"currentConfirmationCount"` // the current number of confirmations for this reconcile request
-	Timestamp                *ethtypes.HexUint64        `json:"timestamp,omitempty"`      // the on-chain timestamp of the transaction's block - only populated in "full" chain tracking mode, since "light" mode never fetches a block
+	Confirmations            []*ethrpc.MinimalBlockInfo `json:"confirmations,omitempty"`     // the confirmation list
+	Rebuilt                  bool                       `json:"rebuilt,omitempty"`           // when true, it means the existing confirmations contained invalid blocks, the new confirmations are rebuilt from scratch
+	NewFork                  bool                       `json:"newFork,omitempty"`           // when true, it means a new fork was detected based on the existing confirmations
+	Confirmed                bool                       `json:"confirmed,omitempty"`         // when true, it means the confirmation list is complete and the transaction is confirmed
+	TargetConfirmationCount  uint64                     `json:"targetConfirmationCount"`     // the target number of confirmations for this reconcile request
+	CurrentConfirmationCount uint64                     `json:"currentConfirmationCount"`    // the current number of confirmations for this reconcile request
+	TxnBlockTimestamp        *ethtypes.HexUint64        `json:"txnBlockTimestamp,omitempty"` // the on-chain timestamp of the block the transaction was included in - not a confirmation-finality guarantee, this can change if the chain forks before Confirmed becomes true. Only populated in "full" chain tracking mode, since "light" mode never fetches a block
 }
 
 type BlockListenerConfig struct {

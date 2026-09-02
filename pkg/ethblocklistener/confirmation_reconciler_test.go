@@ -155,7 +155,7 @@ func TestReconcileConfirmationsForTransaction_HeadBlockNumber_FullyConfirmed(t *
 		assert.Equal(t, uint64(5), result.CurrentConfirmationCount)
 		assert.Equal(t, uint64(5), result.TargetConfirmationCount)
 		// Light mode never fetches a block, only the receipt - so no timestamp is ever available here.
-		assert.Nil(t, result.Timestamp)
+		assert.Nil(t, result.TxnBlockTimestamp)
 	}
 }
 
@@ -347,8 +347,8 @@ func TestReconcileConfirmationsForTransaction_NewConfirmation(t *testing.T) {
 		{Number: 1978, Hash: generateTestHash(1978), ParentHash: generateTestHash(1977)},
 	}), result.Confirmations)
 	assert.Equal(t, uint64(5), result.TargetConfirmationCount)
-	if assert.NotNil(t, result.Timestamp) {
-		assert.Equal(t, ethtypes.HexUint64(1735689600), *result.Timestamp)
+	if assert.NotNil(t, result.TxnBlockTimestamp) {
+		assert.Equal(t, ethtypes.HexUint64(1735689600), *result.TxnBlockTimestamp)
 	}
 	assert.NotNil(t, receipt)
 
