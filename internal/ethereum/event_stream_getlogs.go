@@ -157,29 +157,32 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 				poll.reset(fromBlock)
 			}
 
-			// In full chain tracking mode we poll all the way to the head, checking the blocks we
-			// already polled are still canonical and rewinding our position if not.
-			// In light chain tracking mode there is no canonical chain view to check against, so
-			// instead we never poll a block still inside the unstable window - checkpointBlockGap
-			// behind the head (see function comment).
-			deliveryHead := chainHead
-			var headChain []*ethrpc.BlockInfoJSONRPC
-			if es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight {
-				deliveryHead = chainHead - es.c.checkpointBlockGap
-				if deliveryHead < 0 {
-					deliveryHead = 0
-				}
-			} else {
-				headChain = es.c.blockListener.SnapshotMonitoredHeadChain()
-				poll.checkReorgRewind(es.ctx, headChain)
+			// The stability horizon is the point checkpointBlockGap behind the head, below which
+			// re-orgs are not expected
+			stableHead := chainHead - es.c.checkpointBlockGap
+			if stableHead < 0 {
+				stableHead = 0
 			}
 
 			// Check we're not outside of the steady state window, and need to fall back to catchup
-			// mode. Measured against the blocks we may poll, so a checkpointBlockGap larger than
-			// the threshold cannot bounce us between steady state and catchup.
-			if (deliveryHead - poll.fromBlock) > es.c.catchupThreshold {
-				log.L(es.ctx).Warnf("Block gap reached %d (above threshold of %d) - reverting to catchup mode", deliveryHead-poll.fromBlock, es.c.catchupThreshold)
+			// mode. Catchup only polls up to the stability horizon, so we measure against the same
+			// point - the two loops can never disagree and bounce control between each other.
+			if (stableHead - poll.fromBlock) > es.c.catchupThreshold {
+				log.L(es.ctx).Warnf("Block gap reached %d (above threshold of %d) - reverting to catchup mode", stableHead-poll.fromBlock, es.c.catchupThreshold)
 				return false
+			}
+
+			// In full chain tracking mode we poll all the way to the head, checking the blocks we
+			// already polled are still canonical and rewinding our position if not.
+			// In light chain tracking mode there is no canonical chain view to check against, so
+			// instead we never poll a block still inside the unstable window (see function comment).
+			deliveryHead := chainHead
+			var headChain []*ethrpc.BlockInfoJSONRPC
+			if es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+				deliveryHead = stableHead
+			} else {
+				headChain = es.c.blockListener.SnapshotMonitoredHeadChain()
+				poll.checkReorgRewind(es.ctx, headChain)
 			}
 
 			// Poll the next page of blocks, if there are any we haven't polled yet
@@ -201,13 +204,8 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 				// (checkpointBlockGap behind the head, where re-orgs are not expected). In light mode
 				// the poll position never passes the horizon, so the scan position is used directly.
 				hwmBlock := toBlock + 1
-				if es.c.chainTrackingMode != ffcapi.ChainTrackingModeLight {
-					if horizon := chainHead - es.c.checkpointBlockGap; horizon < hwmBlock {
-						hwmBlock = horizon
-					}
-					if hwmBlock < 0 {
-						hwmBlock = 0
-					}
+				if es.c.chainTrackingMode != ffcapi.ChainTrackingModeLight && stableHead < hwmBlock {
+					hwmBlock = stableHead
 				}
 
 				// Dispatch the events

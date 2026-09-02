@@ -273,21 +273,15 @@ func (es *eventStream) leadGroupCatchup() bool {
 			}
 		}
 
-		// In client polling mode with light chain tracking, blocks in the unstable window at the
-		// head of the chain are never polled (see leadGroupSteadyStateGetLogs) - including while
-		// paging through a backlog here
-		chainHead := blockNumberToInt64(chainHeadBlock)
-		pollableHead := chainHead
-		lightClientMode := es.c.eventFilterPollingMode == FilterPollingModeClient && es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight
-		if lightClientMode {
-			pollableHead = chainHead - es.c.checkpointBlockGap
-			if pollableHead < 0 {
-				pollableHead = 0
-			}
+		// Catchup only polls blocks that are outside the re-org unstable window at the head of
+		// the chain (checkpointBlockGap behind the head).
+		// The steady-state loops own delivery of the unstable window.
+		// We stop on the first page where the end lands between catchupThreshold+checkpointBlockGap
+		// (say 550) and the checkpointBlockGap (say 50) before the head to do the switch.
+		pollableHead := blockNumberToInt64(chainHeadBlock) - es.c.checkpointBlockGap
+		if pollableHead < 0 {
+			pollableHead = 0
 		}
-
-		// Check if we're ready to exit catchup mode - measured against the blocks we may poll,
-		// so a checkpointBlockGap larger than the threshold cannot hold us in catchup forever
 		headGap := pollableHead - fromBlock
 		if headGap < es.c.catchupThreshold {
 			log.L(es.ctx).Infof("Stream head is up to date with chain fromBlock=%d chainHead=%d headGap=%d", fromBlock, chainHeadBlock, headGap)
@@ -307,16 +301,9 @@ func (es *eventStream) leadGroupCatchup() bool {
 		}
 		log.L(es.ctx).Infof("Stream catchup fromBlock=%d toBlock=%d headBlock=%d events=%d listeners=%d", fromBlock, toBlock, chainHeadBlock, len(events), len(ag.listeners))
 
-		// The HWM for the restart checkpoint is min(scan position, stability horizon) - the final
-		// catchup page(s) can reach into the re-org unstable window at the head of the chain, and
-		// a quiet listener's checkpoint must not follow them there. In light+client mode the poll
-		// position is already capped at the horizon above.
+		// The poll position never enters the unstable window, so the HWM for the restart
+		// checkpoint is simply the next block to poll
 		hwmBlock := toBlock + 1
-		if !lightClientMode {
-			if horizon := chainHead - es.c.checkpointBlockGap; horizon < hwmBlock && horizon > fromBlock {
-				hwmBlock = horizon
-			}
-		}
 
 		// Dispatch the events
 		if es.dispatchSetHWMCheckExit(ag, events, hwmBlock) {
@@ -388,9 +375,12 @@ func (es *eventStream) leadGroupSteadyState() bool {
 					}
 				}
 
-				// Check we're not outside of the steady state window, and need to fall back to catchup mode
+				// Check we're not outside of the steady state window, and need to fall back to
+				// catchup mode. Catchup only polls up to the stability horizon (checkpointBlockGap
+				// behind the head), so we measure against the same point - the two loops can never
+				// disagree and bounce control between each other.
 				chainHeadBlock, _ := es.c.blockListener.GetHighestBlock(es.ctx) /* note we know we're initialized here and will not block */
-				blockGapEstimate := (blockNumberToInt64(chainHeadBlock) - fromBlock)
+				blockGapEstimate := (blockNumberToInt64(chainHeadBlock) - es.c.checkpointBlockGap - fromBlock)
 				if blockGapEstimate > es.c.catchupThreshold {
 					log.L(es.ctx).Warnf("Block gap estimate reached %d (above threshold of %d) - reverting to catchup mode", blockGapEstimate, es.c.catchupThreshold)
 					return false

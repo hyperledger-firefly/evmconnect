@@ -1935,12 +1935,42 @@ func TestLeadGroupGetLogsLightModeNoCatchupOscillation(t *testing.T) {
 	assert.True(t, <-loopDone)
 }
 
-func TestLeadGroupCatchupLightModeClientCapsAtStableHead(t *testing.T) {
+func TestLeadGroupGetLogsFullModeNoCatchupOscillation(t *testing.T) {
+
+	es, _, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 905)
+	defer done()
+	es.c.catchupThreshold = 90
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+	mbl.On("SnapshotMonitoredHeadChain").Return([]*ethrpc.BlockInfoJSONRPC{}).Maybe()
+
+	polls := make(chan []int64, 10)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	// The raw gap to the head (1000-905=95) is over the catchup threshold (90), but catchup only
+	// polls to the stability horizon (950), which we are within the threshold of (45) - so it
+	// would exit straight back to us without polling. We must measure the reversion check the
+	// same way and stay in steady state (still polling to the head - full mode delivers the
+	// unstable window with hash tracking), or the two loops would bounce control forever
+	assert.Equal(t, []int64{905, 914}, <-polls)
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+}
+
+func TestLeadGroupCatchupCapsAtStableHead(t *testing.T) {
 
 	es, l, mRPC, mbl, _, done := testGetLogsModeStream(t, 900)
 	defer done()
-	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
-	es.c.eventFilterPollingMode = FilterPollingModeClient
 	es.c.catchupThreshold = 90
 	es.c.catchupPageSize = 500
 	es.c.checkpointBlockGap = 6
@@ -1955,39 +1985,35 @@ func TestLeadGroupCatchupLightModeClientCapsAtStableHead(t *testing.T) {
 	})
 
 	// The gap to the pollable head (994-900=94) is over the catchup threshold (90), so catchup
-	// runs one page - but in light+client mode that page is capped at head-checkpointBlockGap
-	// (994) rather than running to fromBlock+catchupPageSize-1 (1399), so the unstable window is
-	// never delivered, and the HWM (994+1) follows the poll position with no wind-back
+	// runs one page - but that page is capped at head-checkpointBlockGap (994) rather than
+	// running to fromBlock+catchupPageSize-1 (1399), so the unstable window is left for the
+	// steady state loop to deliver, and the HWM (994+1) follows the poll position exactly
 	exited := es.leadGroupCatchup()
 	assert.False(t, exited)
 	assert.Equal(t, []int64{900, 994}, <-polls)
 	assert.Equal(t, int64(995), l.getHWMBlock())
 }
 
-func TestLeadGroupCatchupLightModeClientCaughtUpToStableHead(t *testing.T) {
+func TestLeadGroupCatchupCaughtUpToStableHead(t *testing.T) {
 
 	es, _, _, mbl, _, done := testGetLogsModeStream(t, 980)
 	defer done()
-	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
-	es.c.eventFilterPollingMode = FilterPollingModeClient
 	es.c.catchupThreshold = 20
 	es.c.checkpointBlockGap = 6
 
 	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
 
 	// The raw gap to the head (20) is at the catchup threshold, but the gap to the pollable head
-	// (994-980=14) is below it - so light+client catchup exits back to steady state without
-	// polling at all (no eth_getLogs expectation is registered - a poll fails the test)
+	// (994-980=14) is below it - so catchup exits back to steady state without polling at all
+	// (no eth_getLogs expectation is registered - a poll fails the test)
 	exited := es.leadGroupCatchup()
 	assert.False(t, exited)
 }
 
-func TestLeadGroupCatchupLightModeClientHeadBelowGap(t *testing.T) {
+func TestLeadGroupCatchupHeadBelowGap(t *testing.T) {
 
 	es, _, _, mbl, _, done := testGetLogsModeStream(t, 0)
 	defer done()
-	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
-	es.c.eventFilterPollingMode = FilterPollingModeClient
 	es.c.catchupThreshold = 1
 	es.c.checkpointBlockGap = 6
 
@@ -1999,53 +2025,19 @@ func TestLeadGroupCatchupLightModeClientHeadBelowGap(t *testing.T) {
 	assert.False(t, exited)
 }
 
-func TestLeadGroupCatchupFullModeHWMCappedAtCheckpointGap(t *testing.T) {
+func TestLeadGroupCatchupGapLargerThanThresholdExitsToSteadyState(t *testing.T) {
 
-	es, l, mRPC, mbl, _, done := testGetLogsModeStream(t, 900)
-	defer done()
-	es.c.catchupThreshold = 90
-	es.c.catchupPageSize = 500
-
-	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
-
-	polls := make(chan []int64, 10)
-	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
-		filter := args[3].(*ethrpc.LogFilterJSONRPC)
-		polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}
-		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
-	})
-
-	// The final catchup page reaches the head of the chain (1000), inside the re-org unstable
-	// window - the events are delivered, but the HWM for the restart checkpoint is capped at the
-	// stability horizon (head-checkpointBlockGap=950), not toBlock+1, so a restart before the
-	// steady state loop next persists a checkpoint cannot silently skip a downtime re-org
-	exited := es.leadGroupCatchup()
-	assert.False(t, exited)
-	assert.Equal(t, []int64{900, 1000}, <-polls)
-	assert.Equal(t, int64(950), l.getHWMBlock())
-}
-
-func TestLeadGroupCatchupFullModeHWMCapNeverMovesBackwards(t *testing.T) {
-
-	es, l, mRPC, mbl, _, done := testGetLogsModeStream(t, 960)
+	es, _, _, mbl, _, done := testGetLogsModeStream(t, 960)
 	defer done()
 	es.c.catchupThreshold = 30
 
 	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
 
-	polls := make(chan []int64, 10)
-	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
-		filter := args[3].(*ethrpc.LogFilterJSONRPC)
-		polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}
-		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
-	})
-
-	// Degenerate config: checkpointBlockGap (50) is larger than catchupThreshold (30), so the
-	// whole catchup range is inside the stability horizon (950). The horizon cap must not pull
-	// the HWM backwards below the scan position, or catchup would never make progress
+	// Degenerate config: checkpointBlockGap (50) is larger than catchupThreshold (30), so from
+	// hwm 960 the pollable head (950) is already behind us. Catchup must hand straight over to
+	// the steady state loop (which measures its reversion check against the same pollable head,
+	// so control cannot bounce back) rather than polling or spinning here (no eth_getLogs
+	// expectation is registered - a poll fails the test)
 	exited := es.leadGroupCatchup()
 	assert.False(t, exited)
-	assert.Equal(t, []int64{960, 969}, <-polls)
-	assert.Equal(t, []int64{970, 979}, <-polls)
-	assert.Equal(t, int64(980), l.getHWMBlock())
 }
