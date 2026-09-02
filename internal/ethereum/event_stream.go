@@ -618,7 +618,7 @@ func (es *eventStream) filterEnrichSort(ctx context.Context, ag *aggregatedListe
 	return updates, nil
 }
 
-func (es *eventStream) getBlockRangeEvents(ctx context.Context, ag *aggregatedListener, fromBlock, toBlock int64) (ffcapi.ListenerEvents, error) {
+func (es *eventStream) getBlockRangeLogs(ctx context.Context, ag *aggregatedListener, fromBlock, toBlock int64) ([]*ethrpc.LogJSONRPC, error) {
 	var ethLogs []*ethrpc.LogJSONRPC
 	logFilterJSONRPCReq := &ethrpc.LogFilterJSONRPC{
 		FromBlock: ethtypes.NewHexInteger64(fromBlock),
@@ -635,6 +635,14 @@ func (es *eventStream) getBlockRangeEvents(ctx context.Context, ag *aggregatedLi
 	rpcErr := es.c.rpc.CallRPC(ctx, &ethLogs, "eth_getLogs", logFilterJSONRPCReq)
 	if rpcErr != nil {
 		return nil, rpcErr.Error()
+	}
+	return ethLogs, nil
+}
+
+func (es *eventStream) getBlockRangeEvents(ctx context.Context, ag *aggregatedListener, fromBlock, toBlock int64) (ffcapi.ListenerEvents, error) {
+	ethLogs, err := es.getBlockRangeLogs(ctx, ag, fromBlock, toBlock)
+	if err != nil {
+		return nil, err
 	}
 	return es.filterEnrichSort(ctx, ag, ethLogs)
 }

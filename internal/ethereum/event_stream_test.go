@@ -18,6 +18,7 @@ package ethereum
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/hyperledger-firefly/evmconnect/mocks/ethblocklistenermocks"
 	"github.com/hyperledger-firefly/evmconnect/mocks/rpcbackendmocks"
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
+	"github.com/hyperledger-firefly/signer/pkg/abi"
 	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
 	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
@@ -1303,6 +1305,10 @@ func TestLeadGroupDeliverEventsGetLogsMode(t *testing.T) {
 
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
 		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
+		// Every block is immediately stable - this test exercises delivery at the head, not
+		// re-org repair, and the real block listener's monitored view stays empty here (its
+		// block queries are mocked to nothing), which would otherwise hold the scan back
+		conf.Set(EventsCheckpointBlockGap, 0)
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
@@ -1505,7 +1511,9 @@ func TestLeadGroupGetLogsPaginationAndHWMClamp(t *testing.T) {
 	defer done()
 
 	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
-	mbl.On("SnapshotMonitoredHeadChain").Return([]*ethrpc.BlockInfoJSONRPC{}).Maybe()
+	// The monitored view covers the whole unstable window (checkpointBlockGap 50 behind head
+	// 1000) - the scan may only pass blocks above the stability horizon that the view covers
+	mbl.On("SnapshotMonitoredHeadChain").Return(testHeadChain(951, 1000, 1001 /* no fork */))
 
 	type pollRange struct{ from, to, hwmAtCall int64 }
 	polls := make(chan pollRange, 20)
@@ -1601,6 +1609,79 @@ func TestLeadGroupGetLogsReorgRewind(t *testing.T) {
 	assert.True(t, <-loopDone)
 }
 
+func TestLeadGroupGetLogsFullModeHoldsAtViewCoverage(t *testing.T) {
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 960)
+	defer done()
+	es.c.checkpointBlockGap = 6
+
+	// The re-org repair for blocks above the stability horizon relies on the basis hashes
+	// recorded from the monitored view at scan time, so the scan must never pass a block above
+	// the horizon that the view does not cover. The view back-fills here in three stages:
+	// empty (startup, before the seed), covering the window base only, then the full window.
+	var mux sync.Mutex
+	headChain := []*ethrpc.BlockInfoJSONRPC{}
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+	mbl.On("SnapshotMonitoredHeadChain").Return(func() []*ethrpc.BlockInfoJSONRPC {
+		mux.Lock()
+		defer mux.Unlock()
+		return headChain
+	})
+	setHeadChain := func(chain []*ethrpc.BlockInfoJSONRPC) {
+		mux.Lock()
+		defer mux.Unlock()
+		headChain = chain
+	}
+
+	type pollRange struct{ from, to, hwmAtCall int64 }
+	polls := make(chan pollRange, 20)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- pollRange{
+			from:      filter.FromBlock.BigInt().Int64(),
+			to:        filter.ToBlock.BigInt().Int64(),
+			hwmAtCall: l.getHWMBlock(),
+		}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	readPoll := func(what string) pollRange {
+		select {
+		case p := <-polls:
+			return p
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %s", what)
+			return pollRange{}
+		}
+	}
+
+	// With an empty view we page up to the stability horizon (994) and no further - blocks at or
+	// below the horizon are stable by definition and need no basis record
+	assert.Equal(t, pollRange{from: 960, to: 969, hwmAtCall: 960}, readPoll("page 1"))
+	assert.Equal(t, pollRange{from: 970, to: 979, hwmAtCall: 970}, readPoll("page 2"))
+	assert.Equal(t, pollRange{from: 980, to: 989, hwmAtCall: 980}, readPoll("page 3"))
+	assert.Equal(t, pollRange{from: 990, to: 994, hwmAtCall: 990}, readPoll("scan to horizon"))
+
+	// The view now covers the base of the unstable window - the scan follows it, exactly
+	setHeadChain(testHeadChain(995, 996, 1001 /* no fork */))
+	assert.Equal(t, pollRange{from: 995, to: 996, hwmAtCall: 994}, readPoll("scan to view coverage"))
+
+	// The view completes to the head - the scan completes with it, and the HWM/checkpoint stays
+	// at the stability horizon throughout
+	setHeadChain(testHeadChain(995, 1000, 1001 /* no fork */))
+	assert.Equal(t, pollRange{from: 997, to: 1000, hwmAtCall: 994}, readPoll("scan to head"))
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+	assert.Equal(t, int64(994), l.getHWMBlock())
+	assert.Equal(t, int64(994), es.headBlock.Load())
+}
+
 func TestGetLogsPollStateCheckReorgRewind(t *testing.T) {
 
 	ctx := context.Background()
@@ -1656,6 +1737,47 @@ func TestGetLogsPollStateAdvance(t *testing.T) {
 	assert.Empty(t, ps.polledChain)
 }
 
+func TestGetLogsPollStateAdvanceRescan(t *testing.T) {
+
+	testLog := func(blockNumber int64, blockHash string) *ethrpc.LogJSONRPC {
+		return &ethrpc.LogJSONRPC{
+			BlockNumber: ethtypes.HexUint64(blockNumber), //nolint:gosec
+			BlockHash:   ethtypes.MustNewHexBytes0xPrefix(blockHash),
+		}
+	}
+	hash995 := "0x00000000000000000000000000000000000000000000000000000000000003e3"
+	hash996 := "0x00000000000000000000000000000000000000000000000000000000000003e4"
+	hash1000 := "0x00000000000000000000000000000000000000000000000000000000000003e8"
+
+	// A page mid-sweep: delivered block-versions are recorded, the committed base holds at the
+	// stability horizon, and the sweep cursor pages onwards without waiting
+	ps := &getLogsPollState{fromBlock: 994, scanBlock: -1}
+	ps.advanceRescan([]*ethrpc.LogJSONRPC{testLog(995, hash995), testLog(996, hash996)}, 994, 996, 1000)
+	assert.Equal(t, int64(994), ps.fromBlock)
+	assert.Equal(t, int64(997), ps.scanBlock)
+	assert.Equal(t, map[string]int64{
+		string(ethtypes.MustNewHexBytes0xPrefix(hash995)): 995,
+		string(ethtypes.MustNewHexBytes0xPrefix(hash996)): 996,
+	}, ps.deliveredBlocks)
+
+	// The final page of the sweep reaches the head - the cursor resets so the next sweep
+	// re-scans the whole window from the committed base
+	ps.advanceRescan([]*ethrpc.LogJSONRPC{testLog(1000, hash1000)}, 994, 1000, 1000)
+	assert.Equal(t, int64(994), ps.fromBlock)
+	assert.Equal(t, int64(-1), ps.scanBlock)
+	assert.Len(t, ps.deliveredBlocks, 3)
+
+	// The chain grows and the committed base advances with the stability horizon - records for
+	// blocks that fall below the base are pruned (those blocks are stable, never re-scanned)
+	ps.advanceRescan(nil, 996, 1002, 1002)
+	assert.Equal(t, int64(996), ps.fromBlock)
+	assert.Equal(t, int64(-1), ps.scanBlock)
+	assert.Equal(t, map[string]int64{
+		string(ethtypes.MustNewHexBytes0xPrefix(hash996)):  996,
+		string(ethtypes.MustNewHexBytes0xPrefix(hash1000)): 1000,
+	}, ps.deliveredBlocks)
+}
+
 func TestBlockNumberToInt64Overflow(t *testing.T) {
 	assert.Equal(t, int64(12345), blockNumberToInt64(12345))
 	assert.Panics(t, func() {
@@ -1679,7 +1801,8 @@ func TestLeadGroupGetLogsHWMClampAtZero(t *testing.T) {
 	defer done()
 
 	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(5), true)
-	mbl.On("SnapshotMonitoredHeadChain").Return([]*ethrpc.BlockInfoJSONRPC{}).Maybe()
+	// The whole chain is inside the monitored window (head 5, checkpointBlockGap 50)
+	mbl.On("SnapshotMonitoredHeadChain").Return(testHeadChain(0, 5, 6 /* no fork */))
 
 	polls := make(chan []int64, 10)
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
@@ -1719,6 +1842,10 @@ func TestLeadGroupGetLogsExitDuringDispatch(t *testing.T) {
 
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
 		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
+		// Every block is immediately stable - this test exercises the exit-during-dispatch path,
+		// not re-org repair, and the real block listener's monitored view stays empty here (its
+		// block queries are mocked to nothing), which would otherwise hold the scan back
+		conf.Set(EventsCheckpointBlockGap, 0)
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
@@ -1768,12 +1895,12 @@ func TestLeadGroupGetLogsExitDuringDispatch(t *testing.T) {
 	<-es.streamLoopDone
 }
 
-func TestLeadGroupGetLogsLightModeTrailsHeadByCheckpointGap(t *testing.T) {
+func TestLeadGroupGetLogsLightModeRescansUnstableWindow(t *testing.T) {
 
 	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 960)
 	defer done()
 	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
-	es.c.checkpointBlockGap = 6 // tuned to the stability depth of the chain in light+client mode
+	es.c.checkpointBlockGap = 6 // tuned a small margin above the confirmation target in this mode
 
 	var headMux sync.Mutex
 	head := uint64(1000)
@@ -1802,13 +1929,15 @@ func TestLeadGroupGetLogsLightModeTrailsHeadByCheckpointGap(t *testing.T) {
 		loopDone <- es.leadGroupSteadyStateGetLogs()
 	}()
 
-	// In light mode a block is only polled once it is checkpointBlockGap (6) blocks behind the
-	// head, so pagination stops at 994 even though the head (1000) is beyond it
+	// Light mode pages all the way to the head just like full mode, but the committed position
+	// (and with it the HWM/checkpoint) holds at the stability horizon - checkpointBlockGap (6)
+	// behind the head
 	expected := []pollRange{
 		{from: 960, to: 969, hwmAtCall: 960},
 		{from: 970, to: 979, hwmAtCall: 970},
 		{from: 980, to: 989, hwmAtCall: 980},
-		{from: 990, to: 994, hwmAtCall: 990},
+		{from: 990, to: 999, hwmAtCall: 990},
+		{from: 1000, to: 1000, hwmAtCall: 994},
 	}
 	for i, e := range expected {
 		select {
@@ -1819,25 +1948,40 @@ func TestLeadGroupGetLogsLightModeTrailsHeadByCheckpointGap(t *testing.T) {
 		}
 	}
 
-	// When the head advances, the delivery position trails it by the same gap
+	// In the steady state the whole unstable window is re-scanned on every polling interval -
+	// a re-org inside the window is invisible to light mode (it only sees the head number), so
+	// the changed block hashes in the re-scan are the only signal for replaced events
+	select {
+	case p := <-polls:
+		assert.Equal(t, pollRange{from: 994, to: 1000, hwmAtCall: 994}, p)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for window re-scan")
+	}
+
+	// When the head advances, the window slides with it
 	headMux.Lock()
 	head = 1001
 	headMux.Unlock()
-	select {
-	case p := <-polls:
-		assert.Equal(t, pollRange{from: 995, to: 995, hwmAtCall: 995}, p)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for poll after head advance")
+	deadline := time.After(5 * time.Second)
+	for {
+		var p pollRange
+		select {
+		case p = <-polls:
+		case <-deadline:
+			t.Fatal("timed out waiting for the window to slide")
+		}
+		if p.from == 995 {
+			assert.Equal(t, pollRange{from: 995, to: 1001, hwmAtCall: 995}, p)
+			break
+		}
+		// Re-scans of the old window (including the first to span to the new head) come first
+		assert.Equal(t, int64(994), p.from)
 	}
-
-	// Everything delivered is already outside the unstable window, so the HWM (and hence the
-	// restart checkpoint) is simply the poll position - no wind-back
-	assert.Eventually(t, func() bool {
-		return l.getHWMBlock() == 996 && es.headBlock.Load() == 996
-	}, 5*time.Second, time.Millisecond)
 
 	cancelCtx()
 	assert.True(t, <-loopDone)
+	assert.Equal(t, int64(995), l.getHWMBlock())
+	assert.Equal(t, int64(995), es.headBlock.Load())
 }
 
 func TestLeadGroupGetLogsLightModeHeadBelowGap(t *testing.T) {
@@ -1861,16 +2005,16 @@ func TestLeadGroupGetLogsLightModeHeadBelowGap(t *testing.T) {
 		loopDone <- es.leadGroupSteadyStateGetLogs()
 	}()
 
-	// The whole chain (head 5) is within checkpointBlockGap (6), so the delivery position
-	// clamps at genesis - only block 0 is polled (contrast with full mode, which polls [0,5])
-	assert.Equal(t, []int64{0, 0}, <-polls)
-	assert.Eventually(t, func() bool {
-		return es.headBlock.Load() == 1
-	}, 5*time.Second, time.Millisecond)
+	// The whole chain (head 5) is within checkpointBlockGap (6), so nothing is stable yet: we
+	// still poll to the head, but the committed position (and with it the HWM/checkpoint) clamps
+	// at genesis, and the whole chain is re-scanned each cycle
+	assert.Equal(t, []int64{0, 5}, <-polls)
+	assert.Equal(t, []int64{0, 5}, <-polls)
 
 	cancelCtx()
 	assert.True(t, <-loopDone)
-	assert.Equal(t, int64(1), l.getHWMBlock())
+	assert.Equal(t, int64(0), l.getHWMBlock())
+	assert.Equal(t, int64(0), es.headBlock.Load())
 }
 
 func TestLeadGroupGetLogsLightModeZeroGapPollsToHead(t *testing.T) {
@@ -1894,14 +2038,16 @@ func TestLeadGroupGetLogsLightModeZeroGapPollsToHead(t *testing.T) {
 		loopDone <- es.leadGroupSteadyStateGetLogs()
 	}()
 
+	// With gap 0 every block is stable the moment it is polled, so after the first scan to the
+	// head only the head block itself is re-scanned (the horizon formula min(scan position,
+	// head - gap) is uniform with full mode), and the HWM/checkpoint sits at the head
 	assert.Equal(t, []int64{0, 5}, <-polls)
-	assert.Eventually(t, func() bool {
-		return es.headBlock.Load() == 6
-	}, 5*time.Second, time.Millisecond)
+	assert.Equal(t, []int64{5, 5}, <-polls)
 
 	cancelCtx()
 	assert.True(t, <-loopDone)
-	assert.Equal(t, int64(6), l.getHWMBlock())
+	assert.Equal(t, int64(5), l.getHWMBlock())
+	assert.Equal(t, int64(5), es.headBlock.Load())
 }
 
 func TestLeadGroupGetLogsLightModeNoCatchupOscillation(t *testing.T) {
@@ -1927,9 +2073,259 @@ func TestLeadGroupGetLogsLightModeNoCatchupOscillation(t *testing.T) {
 	}()
 
 	// The raw gap to the head (1000-905=95) is over the catchup threshold (90), but the gap to
-	// the blocks we may actually poll (994-905=89) is not - we must stay in steady state, or we
-	// would bounce between the two loops without making progress
+	// the stability horizon that catchup would poll to (994-905=89) is not - we must measure the
+	// same way and stay in steady state, or we would bounce between the two loops without making
+	// progress
 	assert.Equal(t, []int64{905, 914}, <-polls)
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+}
+
+func TestLeadGroupGetLogsLightModeRescanDedupAndReorgRedetect(t *testing.T) {
+
+	// The block hash before and after a re-org of block 998 - same block number, same transaction,
+	// but any change to the block content changes its hash
+	const blockHashA = "0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4a"
+	const blockHashB = "0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4b"
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 994)
+	defer done()
+	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+	es.c.checkpointBlockGap = 6
+	es.c.chainID = "12345"
+	es.c.eventBlockTimestamps = false
+
+	// A real filter and enricher on the listener, and a readable events channel, so the test can
+	// observe exactly what gets delivered
+	var transferEvent *abi.Entry
+	err := json.Unmarshal([]byte(abiTransferEvent), &transferEvent)
+	require.NoError(t, err)
+	l.config.filters = []*eventFilter{{
+		Event:  transferEvent,
+		Topic0: ethtypes.MustNewHexBytes0xPrefix("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+	}}
+	l.config.options = &listenerOptions{}
+	l.ee = &eventEnricher{connector: es.c}
+	events := make(chan *ffcapi.ListenerEvent)
+	es.events = events
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+
+	makeTransferLog := func(blockHash string) *ethrpc.LogJSONRPC {
+		return &ethrpc.LogJSONRPC{
+			BlockNumber:      ethtypes.HexUint64(998),
+			TransactionIndex: ethtypes.HexUint64(0),
+			LogIndex:         ethtypes.HexUint64(0),
+			TransactionHash:  ethtypes.MustNewHexBytes0xPrefix("0x1a5df31d1371f7fc9f242e2b19d287d32e1205cad392ce6ab4b1cf87dbdc9b74"),
+			BlockHash:        ethtypes.MustNewHexBytes0xPrefix(blockHash),
+			Address:          ethtypes.MustNewAddress("0xc89E46EEED41b777ca6625d37E1Cc87C5c037828"),
+			Topics: []ethtypes.HexBytes0xPrefix{
+				ethtypes.MustNewHexBytes0xPrefix("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+				ethtypes.MustNewHexBytes0xPrefix("0x0000000000000000000000003968ef051b422d3d1cdc182a88bba8dd922e6fa4"),
+				ethtypes.MustNewHexBytes0xPrefix("0x000000000000000000000000d0f2f5103fd050739a9fb567251bc460cc24d091"),
+			},
+			Data: ethtypes.MustNewHexBytes0xPrefix("0x00000000000000000000000000000000000000000000000000000000000003e8"),
+		}
+	}
+
+	// Every scan of the window returns the same event - on the original fork until the test
+	// re-orgs it, then on the replacement fork (same block number, new block hash)
+	var mux sync.Mutex
+	reorged := false
+	polls := make(chan []int64, 20)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		select {
+		case polls <- []int64{filter.FromBlock.BigInt().Int64(), filter.ToBlock.BigInt().Int64()}:
+		default: // drop poll records rather than block the loop - the test only samples them
+		}
+		mux.Lock()
+		defer mux.Unlock()
+		if reorged {
+			*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{makeTransferLog(blockHashB)}
+		} else {
+			*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{makeTransferLog(blockHashA)}
+		}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	readEvent := func(what string) *ffcapi.ListenerEvent {
+		select {
+		case e := <-events:
+			return e
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %s", what)
+			return nil
+		}
+	}
+
+	// The first scan of the window [994,1000] detects and delivers the event
+	assert.Equal(t, []int64{994, 1000}, <-polls)
+	ev := readEvent("first detection")
+	assert.Equal(t, blockHashA, ev.Event.ID.BlockHash)
+	assert.Equal(t, fftypes.FFuint64(998), ev.Event.ID.BlockNumber)
+	assert.Equal(t, int64(998), ev.Checkpoint.(*listenerCheckpoint).Block)
+
+	// Re-scans return the identical block-version, which is de-duplicated - wait until we have
+	// seen at least two more full window scans without any event arriving (a duplicate delivery
+	// would be sitting in the unbuffered events channel, and would be received below instead of
+	// the replacement event)
+	for i := 0; i < 2; i++ {
+		assert.Equal(t, []int64{994, 1000}, <-polls)
+	}
+
+	// Re-org block 998 - in light mode the head number alone cannot signal this, but the re-scan
+	// returns the replacement block-version, whose new hash makes its events new detections
+	mux.Lock()
+	reorged = true
+	mux.Unlock()
+	ev = readEvent("re-detection after re-org")
+	assert.Equal(t, blockHashB, ev.Event.ID.BlockHash)
+	assert.Equal(t, fftypes.FFuint64(998), ev.Event.ID.BlockNumber)
+
+	// The committed position (and HWM/checkpoint) held at the stability horizon throughout
+	assert.Equal(t, int64(994), l.getHWMBlock())
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+}
+
+func TestLeadGroupGetLogsLightModeHeadShrink(t *testing.T) {
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 994)
+	defer done()
+	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+	es.c.checkpointBlockGap = 6
+
+	// A light mode head can move backwards (each poll asks eth_blockNumber, and nodes/gateways can
+	// disagree or fork-switch to a shorter chain). One head value per loop cycle:
+	// 1000 (normal), 995 (horizon drops below our committed base), 990 (head drops below the
+	// committed base - nothing to scan at all), then 1001 (chain grows past where it was)
+	heads := []uint64{1000, 995, 990, 1001}
+	var headMux sync.Mutex
+	headIdx := 0
+	mbl.On("GetHighestBlock", mock.Anything).Return(func(context.Context) (uint64, bool) {
+		headMux.Lock()
+		defer headMux.Unlock()
+		head := heads[headIdx]
+		if headIdx < len(heads)-1 {
+			headIdx++
+		}
+		return head, true
+	})
+
+	type pollRange struct{ from, to, hwmAtCall int64 }
+	polls := make(chan pollRange, 20)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		filter := args[3].(*ethrpc.LogFilterJSONRPC)
+		polls <- pollRange{
+			from:      filter.FromBlock.BigInt().Int64(),
+			to:        filter.ToBlock.BigInt().Int64(),
+			hwmAtCall: l.getHWMBlock(),
+		}
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	})
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	expected := []pollRange{
+		// Head 1000: normal scan of the window, committed base at the horizon (994)
+		{from: 994, to: 1000, hwmAtCall: 994},
+		// Head 995: the horizon (989) is now below our committed base, but the base (and with it
+		// the HWM/checkpoint) never moves backwards - we re-scan [994,995] and hold at 994
+		{from: 994, to: 995, hwmAtCall: 994},
+		// Head 990 produced no poll at all (nothing scannable above the committed base).
+		// Head 1001: the chain regrew - the sweep restarts from the held base, which then
+		// advances to the new horizon (995)
+		{from: 994, to: 1001, hwmAtCall: 994},
+		{from: 995, to: 1001, hwmAtCall: 995},
+	}
+	for i, e := range expected {
+		select {
+		case p := <-polls:
+			assert.Equal(t, e, p, "poll %d", i)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for poll %d", i)
+		}
+	}
+
+	cancelCtx()
+	assert.True(t, <-loopDone)
+	assert.Equal(t, int64(995), l.getHWMBlock())
+	assert.Equal(t, int64(995), es.headBlock.Load())
+}
+
+func TestLeadGroupGetLogsLightModeEnrichFailRetry(t *testing.T) {
+
+	const blockHash998 = "0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4a"
+
+	es, l, mRPC, mbl, cancelCtx, done := testGetLogsModeStream(t, 994)
+	defer done()
+	es.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+	es.c.checkpointBlockGap = 6
+	es.c.chainID = "12345"
+	es.c.eventBlockTimestamps = true // enrichment fetches the block for its timestamp
+
+	var transferEvent *abi.Entry
+	err := json.Unmarshal([]byte(abiTransferEvent), &transferEvent)
+	require.NoError(t, err)
+	l.config.filters = []*eventFilter{{
+		Event:  transferEvent,
+		Topic0: ethtypes.MustNewHexBytes0xPrefix("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+	}}
+	l.config.options = &listenerOptions{}
+	l.ee = &eventEnricher{connector: es.c}
+	events := make(chan *ffcapi.ListenerEvent)
+	es.events = events
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1000), true)
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{{
+			BlockNumber:      ethtypes.HexUint64(998),
+			TransactionIndex: ethtypes.HexUint64(0),
+			LogIndex:         ethtypes.HexUint64(0),
+			TransactionHash:  ethtypes.MustNewHexBytes0xPrefix("0x1a5df31d1371f7fc9f242e2b19d287d32e1205cad392ce6ab4b1cf87dbdc9b74"),
+			BlockHash:        ethtypes.MustNewHexBytes0xPrefix(blockHash998),
+			Address:          ethtypes.MustNewAddress("0xc89E46EEED41b777ca6625d37E1Cc87C5c037828"),
+			Topics: []ethtypes.HexBytes0xPrefix{
+				ethtypes.MustNewHexBytes0xPrefix("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+				ethtypes.MustNewHexBytes0xPrefix("0x0000000000000000000000003968ef051b422d3d1cdc182a88bba8dd922e6fa4"),
+				ethtypes.MustNewHexBytes0xPrefix("0x000000000000000000000000d0f2f5103fd050739a9fb567251bc460cc24d091"),
+			},
+			Data: ethtypes.MustNewHexBytes0xPrefix("0x00000000000000000000000000000000000000000000000000000000000003e8"),
+		}}
+	})
+
+	// The enrichment fails on the first cycle - nothing must be delivered or recorded as
+	// delivered, so the retry re-detects the same event
+	mbl.On("GetBlockInfoByHash", mock.Anything, blockHash998).Return(nil, fmt.Errorf("pop")).Once()
+	mbl.On("GetBlockInfoByHash", mock.Anything, blockHash998).Return(&ethrpc.BlockInfoJSONRPC{
+		Number:    ethtypes.HexUint64(998),
+		Hash:      ethtypes.MustNewHexBytes0xPrefix(blockHash998),
+		Timestamp: ethtypes.HexUint64(1700000000),
+	}, nil)
+
+	loopDone := make(chan bool, 1)
+	go func() {
+		loopDone <- es.leadGroupSteadyStateGetLogs()
+	}()
+
+	select {
+	case ev := <-events:
+		assert.Equal(t, blockHash998, ev.Event.ID.BlockHash)
+		assert.Equal(t, fftypes.FFuint64(998), ev.Event.ID.BlockNumber)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the event after the enrich retry")
+	}
 
 	cancelCtx()
 	assert.True(t, <-loopDone)
