@@ -391,7 +391,7 @@ func (bl *blockListener) listenLoop() {
 			}
 			// In light mode there is no canonical chain being built, so the head we dispatch to
 			// consumers is what we report as the canonical height - both through GetHeadBlockNumber
-			// (used for gap-based confirmations) and GetHighestBlock (used by event streams)
+			// (used by FFTM's head-number confirmation checks) and GetHighestBlock (used by event streams)
 			if head == bl.currentChainHead {
 				failCount = 0
 				continue

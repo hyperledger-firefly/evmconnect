@@ -101,19 +101,24 @@ func blockHashInHeadChain(headChain []*ethrpc.BlockInfoJSONRPC, blockNumber int6
 // events.filterPollingMode: client. Instead of establishing a node-side filter, we track our own
 // in-memory poll position and page forwards with stateless eth_getLogs range queries.
 //
-// The listener HWM (scan position used for the restart checkpoint) trails checkpointBlockGap behind
-// the chain head exactly as in server filter mode - but is additionally clamped so it never passes
-// the in-memory poll position, as blocks beyond that have not been queried yet.
-//
 // Re-org behavior depends on the chainTrackingMode:
 //   - full: we poll all the way to the head of the chain. Because a re-org behind the poll position
 //     would otherwise go unnoticed until restart (a node-side filter re-notifies logs on the new
 //     branch, a forwards poll position does not), we record the hashes of the blocks we poll and
 //     check them each cycle against the block listener's canonical chain view - see getLogsPollState.
-//   - light: no block hashes are tracked, so instead we never poll the unstable window at the head
-//     of the chain. A block is only polled once it is checkpointBlockGap behind the head, at which
-//     point that gap is its confirmations - matching how light mode confirms transactions by the
-//     gap between their block and the head. Re-orgs within that gap are never observed.
+//   - light: no block hashes are available to track, so a re-org behind the poll position would
+//     permanently miss the events on the replacement blocks (nothing ever re-scans a passed
+//     range). Instead a block is only polled once it is checkpointBlockGap blocks behind the
+//     head: the connector's own assertion of when a block is stable, exactly as the checkpoint
+//     uses it. Event confirmation remains entirely the responsibility of the FireFly Transaction
+//     Manager - this gap only defines what we are safe to scan-and-forget, so operators should
+//     set it to the stability depth of their chain (it bounds delivery latency in this mode).
+//
+// The listener HWM (scan position used for the restart checkpoint) is min(scan position, stability
+// horizon) - in full mode the scan runs to the head so the checkpoint winds back to the horizon
+// (checkpointBlockGap behind the head, accepting redelivery after restart in exchange for
+// protection against re-orgs that happen while we are down), while in light mode the scan position
+// never passes the horizon, so the checkpoint follows it exactly and restarts redeliver nothing.
 func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 	var ag *aggregatedListener
 	lastUpdate := -1
@@ -152,18 +157,11 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 				poll.reset(fromBlock)
 			}
 
-			// Check we're not outside of the steady state window, and need to fall back to catchup mode
-			if (chainHead - poll.fromBlock) > es.c.catchupThreshold {
-				log.L(es.ctx).Warnf("Block gap reached %d (above threshold of %d) - reverting to catchup mode", chainHead-poll.fromBlock, es.c.catchupThreshold)
-				return false
-			}
-
 			// In full chain tracking mode we poll all the way to the head, checking the blocks we
 			// already polled are still canonical and rewinding our position if not.
 			// In light chain tracking mode there is no canonical chain view to check against, so
-			// instead we never poll into the unstable window at all - a block is only delivered
-			// once it is checkpointBlockGap behind the head, at which point that gap is its
-			// confirmations (the same rule light mode applies to transaction confirmations).
+			// instead we never poll a block still inside the unstable window - checkpointBlockGap
+			// behind the head (see function comment).
 			deliveryHead := chainHead
 			var headChain []*ethrpc.BlockInfoJSONRPC
 			if es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight {
@@ -174,6 +172,14 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 			} else {
 				headChain = es.c.blockListener.SnapshotMonitoredHeadChain()
 				poll.checkReorgRewind(es.ctx, headChain)
+			}
+
+			// Check we're not outside of the steady state window, and need to fall back to catchup
+			// mode. Measured against the blocks we may poll, so a checkpointBlockGap larger than
+			// the threshold cannot bounce us between steady state and catchup.
+			if (deliveryHead - poll.fromBlock) > es.c.catchupThreshold {
+				log.L(es.ctx).Warnf("Block gap reached %d (above threshold of %d) - reverting to catchup mode", deliveryHead-poll.fromBlock, es.c.catchupThreshold)
+				return false
 			}
 
 			// Poll the next page of blocks, if there are any we haven't polled yet
@@ -190,14 +196,18 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 					continue
 				}
 
-				// High water mark is a point safely behind the head of the chain where re-orgs are
-				// not expected, but must never pass the poll position (blocks not yet queried)
-				hwmBlock := chainHead - es.c.checkpointBlockGap
-				if hwmBlock < 0 {
-					hwmBlock = 0
-				}
-				if hwmBlock > toBlock+1 {
-					hwmBlock = toBlock + 1
+				// High water mark for the restart checkpoint is min(scan position, stability horizon).
+				// In full mode the scan runs to the head, so the checkpoint winds back to the horizon
+				// (checkpointBlockGap behind the head, where re-orgs are not expected). In light mode
+				// the poll position never passes the horizon, so the scan position is used directly.
+				hwmBlock := toBlock + 1
+				if es.c.chainTrackingMode != ffcapi.ChainTrackingModeLight {
+					if horizon := chainHead - es.c.checkpointBlockGap; horizon < hwmBlock {
+						hwmBlock = horizon
+					}
+					if hwmBlock < 0 {
+						hwmBlock = 0
+					}
 				}
 
 				// Dispatch the events
