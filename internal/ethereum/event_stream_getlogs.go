@@ -148,6 +148,30 @@ func blockHashInHeadChain(headChain []*ethrpc.BlockInfoJSONRPC, blockNumber int6
 	return nil
 }
 
+// steadyStateScanCeiling returns the highest block the steady-state scan is allowed to poll to.
+// Both modes poll all the way to the head, but in full mode we must never pass a block above the
+// stability horizon that the canonical view does not cover: the hashes recorded from the snapshot
+// at scan time are what checkReorgRewind compares on later cycles, and a block scanned without a
+// recorded hash could never be invalidated. The view is contiguous and sized to the
+// checkpointBlockGap, so in steady operation its top IS the head (the head number itself comes
+// from reconciled blocks) and this ceiling never binds - it holds the scan back only while the
+// view is back-filling, such as at startup when it is seeded with a single anchor block.
+func steadyStateScanCeiling(lightMode bool, chainHead, stableHead int64, headChain []*ethrpc.BlockInfoJSONRPC) int64 {
+	if lightMode {
+		return chainHead
+	}
+	verifiableTo := stableHead
+	if len(headChain) > 0 {
+		if snapTop := blockNumberToInt64(headChain[len(headChain)-1].Number.Uint64()); snapTop > verifiableTo {
+			verifiableTo = snapTop
+		}
+	}
+	if chainHead < verifiableTo {
+		return chainHead
+	}
+	return verifiableTo
+}
+
 // leadGroupSteadyStateGetLogs is the alternative steady state to leadGroupSteadyState, selected with
 // events.filterPollingMode: client.
 //
@@ -159,9 +183,22 @@ func blockHashInHeadChain(headChain []*ethrpc.BlockInfoJSONRPC, blockNumber int6
 // event's block (immediate for an event that arrives already deep enough),
 // delivers to the application, and waits for the ack.
 //
-// For light mode that is based just on a comparison of block numbers, for full mode there is
-// a client-side tracking of the full unstable head and the confirmation list is re-calculated
-// client-side.
+// For light mode that is based just on a comparison of event vs. head block numbers.
+// For full mode there is a client-side tracking of the full unstable head and the confirmation
+// list is re-calculated client-side.
+//
+// Details on polling approach:
+//
+//   - FULL: We take a snapshot of the block listener's current view of the unstable head
+//     of the chain before we poll for events. Each poll we check if a new fork is apparent
+//     and re-poll from the position of the new fork in the chain.
+//     While we cannot be certain the chain we poll is the same we had a client-side view of
+//     before the poll, we know we will detect further divergence on subsequent poll cycles
+//     (as long as it occurs within the checkpointBlockGap).
+//
+//   - LIGHT: Full blocks are not available to compare, so instead we re-scan the whole unstable
+//     window (the checkpointBlockGap blocks below the head) on every sweep, de-duplicating what
+//     we already delivered by block hash.
 //
 // Checkpoints come from two places:
 //
@@ -169,41 +206,17 @@ func blockHashInHeadChain(headChain []*ethrpc.BlockInfoJSONRPC, blockNumber int6
 //     are acknowledged. When events are flowing, the checkpoint moves forwards with delivery.
 //
 //   - Inactivity: when no events are flowing, FFTM periodically polls our high water mark (see
-//     getHWM) recording how far we have scanned, so quiet listeners still make durable progress.
+//     getHWM) recording how far we have scanned, held back checkpointBlockGap from the head.
 //     The LastDetected floor in that response stops an inactivity checkpoint overtaking a
 //     detected-but-unacknowledged event, so anything FFTM had not finished delivering is
 //     re-detected after a crash, at any confirmation count.
 //
-// Polling itself must account for changes in the unstable head.
+// This means on restart, processing will either:
 //
-//   - full: we poll all the way to the head. An eth_getLogs range query tells us nothing about
-//     which block-versions the node actually consulted (an event-less block returns nothing at
-//     all), so we cannot literally record "what we polled". What we record is the block
-//     listener's canonical chain view of the scanned range, snapshotted just before the query -
-//     the basis on which we believed the scan complete. Each cycle we compare those recorded
-//     basis hashes against the listener's current view: any change behind our poll position
-//     (including a re-org that raced the query itself - the stale record is what forces the
-//     mismatch) rewinds the poll position to the divergence point to re-scan and re-detect
-//     (FFTM de-duplicates). For that to be sound, every scanned block must have carried a basis
-//     record, so the scan never passes a block above the stability horizon that the view does
-//     not yet cover (blocks at/below the horizon are stable by definition and need none - which
-//     is also why catchup, which only polls to the horizon, is safe with no records at all).
-//     The records are in-memory only, so the inactivity HWM is capped at the stability horizon
-//     (checkpointBlockGap behind the head): a restart re-scans the window we could no longer
-//     verify, redelivering up to gap blocks for downstream de-duplication.
-//
-//   - light: no block hashes are available to compare, so instead we re-scan the whole unstable
-//     window (the checkpointBlockGap blocks below the head) on every sweep, de-duplicating what
-//     we already delivered by block hash. The block hash commits to the entire block content, so
-//     a re-org replacing a block gives its logs a new hash and they flow through as new
-//     detections (FFTM de-duplicates by protocol ID, and its receipt re-check at confirmation
-//     catches events that were re-orged away). The committed poll position, and with it the
-//     inactivity HWM, holds at the stability horizon exactly as in full mode - a restart re-scans
-//     the window because the delivered-block records are in-memory only. Since a re-org deeper
-//     than the confirmation target replaces events that were already confirmed and actioned,
-//     there is little value in a re-scan window much deeper than that - configure
-//     checkpointBlockGap a small margin above the confirmation target in this mode, as each
-//     polling interval re-scans the whole window.
+//   - Continue from the most recent confirmed acknowledged event, which could be the
+//     confirmation count back from the head (configured to 6 or 10 etc.).
+//   - Continue at least checkpointBlockGap behind wherever the head was before the restart,
+//     possibly significantly longer based on when the inactivity checkpoint was captured.
 func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 	var ag *aggregatedListener
 	lastUpdate := -1
@@ -267,7 +280,6 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 			// instead we re-scan the whole unstable window on every sweep, de-duplicating what we
 			// already delivered by block hash - the committed position (poll.fromBlock) only ever
 			// advances to the stability horizon, and the sweep cursor pages beyond it to the head
-			// (see function comment).
 			lightMode := es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight
 			var headChain []*ethrpc.BlockInfoJSONRPC
 			scanFrom := poll.fromBlock
@@ -281,26 +293,10 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 				scanFrom = poll.fromBlock // may have been rewound
 			}
 
-			// Poll the next page of blocks, if there are any we haven't polled yet
-			toBlock := chainHead
-			if !lightMode {
-				// Above the stability horizon we must never pass a block the canonical view does
-				// not cover: the snapshot is the basis record checkReorgRewind compares against,
-				// and a block scanned without one could never be invalidated. The view is
-				// contiguous and sized to the checkpointBlockGap, so in steady operation its top
-				// IS the head (the head number itself comes from reconciled blocks) and this cap
-				// never binds - it holds us back only while the view is back-filling, such as at
-				// startup when it is seeded with a single anchor block.
-				verifiableTo := stableHead
-				if len(headChain) > 0 {
-					if snapTop := blockNumberToInt64(headChain[len(headChain)-1].Number.Uint64()); snapTop > verifiableTo {
-						verifiableTo = snapTop
-					}
-				}
-				if toBlock > verifiableTo {
-					toBlock = verifiableTo // note caughtUpToHead stays true: we wait a poll interval for the view, we don't spin
-				}
-			}
+			// Poll the next page of blocks, if there are any we haven't polled yet.
+			// Note if the scan ceiling holds us below the head, caughtUpToHead stays true:
+			// we wait a poll interval for the view to extend, we don't spin.
+			toBlock := steadyStateScanCeiling(lightMode, chainHead, stableHead, headChain)
 			if maxToBlock := scanFrom + es.c.catchupPageSize - 1; toBlock > maxToBlock {
 				toBlock = maxToBlock
 				caughtUpToHead = false // page again immediately, rather than waiting the polling interval

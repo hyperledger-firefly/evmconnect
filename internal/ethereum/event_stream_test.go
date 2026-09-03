@@ -1305,13 +1305,24 @@ func TestLeadGroupDeliverEventsGetLogsMode(t *testing.T) {
 
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
 		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
-		// Every block is immediately stable - this test exercises delivery at the head, not
-		// re-org repair, and the real block listener's monitored view stays empty here (its
-		// block queries are mocked to nothing), which would otherwise hold the scan back
-		conf.Set(EventsCheckpointBlockGap, 0)
+		// A single-block monitored window: the real block listener seeds its canonical view with
+		// just the head block (mocked below), so the view covers the head and the scan can poll there
+		// - this test exercises delivery at the head, not re-org repair
+		conf.Set(EventsCheckpointBlockGap, 1)
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
+	})
+	// The block listener seeds its monitored head view with this block, so the view covers the
+	// head and the getLogs scan can poll it. Deliberately a different hash to the event's block, so the
+	// enricher's eth_getBlockByHash below cannot be satisfied from the block cache.
+	seedBlockNumber := ethtypes.HexUint64(testHighBlock)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", seedBlockNumber.String(), false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number:     ethtypes.HexUint64(testHighBlock),
+			Hash:       ethtypes.MustNewHexBytes0xPrefix("0x81f5bd39dbe293bb2a3467a29a30f16ec7c69fbef7a1eec9067a4f76de259e9a"),
+			ParentHash: ethtypes.MustNewHexBytes0xPrefix("0xd7f9ce8c2fd39a41d0cbdcd4a2c8c2ab8b58bdf5bbcae665b433e6a4f00e350f"),
+		}}
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", mock.Anything, false).Return(nil).Maybe()
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(nil).Run(func(args mock.Arguments) {
@@ -1417,11 +1428,25 @@ func TestLeadGroupGetLogsRetry(t *testing.T) {
 	}
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
 		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
+		// A single-block monitored window: the real block listener seeds its canonical view with
+		// just the head block (mocked below), so the view covers the head and the scan can poll there
+		// - this test exercises the getLogs retry path
+		conf.Set(EventsCheckpointBlockGap, 1)
 	})
 
 	retried := make(chan struct{})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
+	})
+	// The block listener seeds its monitored head view with this block, so the view covers the
+	// head and the getLogs scan can poll it
+	seedBlockNumber := ethtypes.HexUint64(testHighBlock)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", seedBlockNumber.String(), false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number:     ethtypes.HexUint64(testHighBlock),
+			Hash:       ethtypes.MustNewHexBytes0xPrefix("0x81f5bd39dbe293bb2a3467a29a30f16ec7c69fbef7a1eec9067a4f76de259e9a"),
+			ParentHash: ethtypes.MustNewHexBytes0xPrefix("0xd7f9ce8c2fd39a41d0cbdcd4a2c8c2ab8b58bdf5bbcae665b433e6a4f00e350f"),
+		}}
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", mock.Anything, false).Return(nil).Maybe()
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(nil).Run(func(args mock.Arguments) {
@@ -1615,7 +1640,7 @@ func TestLeadGroupGetLogsFullModeHoldsAtViewCoverage(t *testing.T) {
 	defer done()
 	es.c.checkpointBlockGap = 6
 
-	// The re-org repair for blocks above the stability horizon relies on the basis hashes
+	// The re-org repair for blocks above the stability horizon relies on the hashes
 	// recorded from the monitored view at scan time, so the scan must never pass a block above
 	// the horizon that the view does not cover. The view back-fills here in three stages:
 	// empty (startup, before the seed), covering the window base only, then the full window.
@@ -1661,7 +1686,7 @@ func TestLeadGroupGetLogsFullModeHoldsAtViewCoverage(t *testing.T) {
 	}
 
 	// With an empty view we page up to the stability horizon (994) and no further - blocks at or
-	// below the horizon are stable by definition and need no basis record
+	// below the horizon are stable by definition and need no recorded hash
 	assert.Equal(t, pollRange{from: 960, to: 969, hwmAtCall: 960}, readPoll("page 1"))
 	assert.Equal(t, pollRange{from: 970, to: 979, hwmAtCall: 970}, readPoll("page 2"))
 	assert.Equal(t, pollRange{from: 980, to: 989, hwmAtCall: 980}, readPoll("page 3"))
@@ -1842,13 +1867,23 @@ func TestLeadGroupGetLogsExitDuringDispatch(t *testing.T) {
 
 	ctx, c, mRPC, done := newTestConnector(t, func(conf config.Section) {
 		conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
-		// Every block is immediately stable - this test exercises the exit-during-dispatch path,
-		// not re-org repair, and the real block listener's monitored view stays empty here (its
-		// block queries are mocked to nothing), which would otherwise hold the scan back
-		conf.Set(EventsCheckpointBlockGap, 0)
+		// A single-block monitored window: the real block listener seeds its canonical view with
+		// just the head block (mocked below), so the view covers the head and the scan can poll there
+		// - this test exercises the exit-during-dispatch path
+		conf.Set(EventsCheckpointBlockGap, 1)
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexInteger64(testHighBlock)
+	})
+	// The block listener seeds its monitored head view with this block, so the view covers the
+	// head and the getLogs scan can poll it
+	seedBlockNumber := ethtypes.HexUint64(testHighBlock)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", seedBlockNumber.String(), false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number:     ethtypes.HexUint64(testHighBlock),
+			Hash:       ethtypes.MustNewHexBytes0xPrefix("0x81f5bd39dbe293bb2a3467a29a30f16ec7c69fbef7a1eec9067a4f76de259e9a"),
+			ParentHash: ethtypes.MustNewHexBytes0xPrefix("0xd7f9ce8c2fd39a41d0cbdcd4a2c8c2ab8b58bdf5bbcae665b433e6a4f00e350f"),
+		}}
 	})
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", mock.Anything, false).Return(nil).Maybe()
 	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_newBlockFilter").Return(nil).Run(func(args mock.Arguments) {
