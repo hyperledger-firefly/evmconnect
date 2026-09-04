@@ -82,6 +82,7 @@
 |maxIdleConnsPerHost|The max number of idle connections, per unique hostname. Zero means net/http uses the default of only 2.|`int`|`100`
 |passthroughHeadersEnabled|Enable passing through the set of allowed HTTP request headers|`boolean`|`false`
 |requestTimeout|The maximum amount of time that a request is allowed to remain open|[`time.Duration`](https://pkg.go.dev/time#Duration)|`30s`
+|rpcRoutingMode|Which connection JSON/RPC calls are made on when a WebSocket is enabled. 'auto' routes node-sticky chain queries (blocks, logs, filters, receipts) to the WebSocket and stateless calls (submission, gas, balance) to the HTTP connection pool. 'ws' routes everything to the WebSocket. 'http' routes everything to the HTTP connection pool, leaving the WebSocket to carry only the newHeads subscription. 'legacy' reproduces the routing used before this setting existed, where only the block listener used the WebSocket|http,ws,auto,legacy|`auto`
 |tlsHandshakeTimeout|The maximum amount of time to wait for a successful TLS handshake|[`time.Duration`](https://pkg.go.dev/time#Duration)|`10s`
 |traceTXForRevertReason|Enable the use of transaction trace functions (e.g. debug_traceTransaction) to obtain transaction revert reasons. This can place a high load on the EVM client.|`boolean`|`false`
 |txCacheSize|Maximum of transactions to hold in the transaction info cache|`int`|`250`

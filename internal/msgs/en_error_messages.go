@@ -92,4 +92,7 @@ var (
 	MsgMonitoredHeadLengthInvalid               = ffe("FF23072", "Monitored head length must be greater than or equal to 1 value=%d")
 	MsgUnknownJSONFormatOptionValue             = ffe("FF23073", "Unknown value '%s' for JSON formatting option '%s'. Supported values: %s")
 	MsgMetricsInitFail                          = ffe("FF23074", "Failed to initialize metrics for subsystem '%s'")
+	MsgInvalidRPCRoutingMode                    = ffe("FF23075", "Invalid JSON/RPC routing mode '%s': must be 'http', 'ws', 'auto' or 'legacy'")
+	MsgWebSocketNotConfigured                   = ffe("FF23076", "A WebSocket connection is not configured")
+	MsgRPCClientClosed                          = ffe("FF23077", "The JSON/RPC client is closed")
 )

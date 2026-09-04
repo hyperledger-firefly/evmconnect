@@ -674,7 +674,7 @@ func TestBuildConfirmationQueueUsingInMemoryPartialChain_EmptyCanonicalChain(t *
 	mRPC := &rpcbackendmocks.Backend{}
 	bl := &blockListener{
 		canonicalChain: list.New(), // Empty canonical chain
-		backend:        mRPC,
+		rpc:            utRPC(t, mRPC),
 	}
 	bl.blockCache, _ = lru.New(100)
 
@@ -703,7 +703,7 @@ func TestHandleZeroTargetConfirmationCount_EmptyCanonicalChain(t *testing.T) {
 	mRPC := &rpcbackendmocks.Backend{}
 	bl := &blockListener{
 		canonicalChain: list.New(), // Empty canonical chain
-		backend:        mRPC,
+		rpc:            utRPC(t, mRPC),
 	}
 	bl.blockCache, _ = lru.New(100)
 
@@ -998,7 +998,7 @@ func TestBuildConfirmationList_FailedToFetchBlockInfo(t *testing.T) {
 	mRPC := &rpcbackendmocks.Backend{}
 	bl := &blockListener{
 		canonicalChain: createTestChain(150, 150),
-		backend:        mRPC,
+		rpc:            utRPC(t, mRPC),
 	}
 	bl.blockCache, _ = lru.New(100)
 
@@ -1032,7 +1032,7 @@ func TestBuildConfirmationList_NilBlockInfo(t *testing.T) {
 	mRPC := &rpcbackendmocks.Backend{}
 	bl := &blockListener{
 		canonicalChain: createTestChain(150, 150),
-		backend:        mRPC,
+		rpc:            utRPC(t, mRPC),
 	}
 	bl.blockCache, _ = lru.New(100)
 
@@ -1497,7 +1497,7 @@ func newFakedChainBlockListener(t *testing.T, chain *list.List) (*rpcbackendmock
 	blockCache, _ := lru.New(100)
 	bl := &blockListener{
 		canonicalChain: chain,
-		backend:        mRPC,
+		rpc:            utRPC(t, mRPC),
 		blockCache:     blockCache,
 	}
 	return mRPC, bl

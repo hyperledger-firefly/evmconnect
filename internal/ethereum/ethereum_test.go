@@ -31,6 +31,7 @@ import (
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/signer/pkg/abi"
+	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -39,6 +40,12 @@ import (
 )
 
 func strPtr(s string) *string { return &s }
+
+func utRPC(t *testing.T, mRPC rpcbackend.RPC) ethrpc.Client {
+	rpc, err := ethrpc.NewClientWithBackends(t.Context(), ethrpc.RoutingModeHTTP, mRPC, nil)
+	require.NoError(t, err)
+	return rpc
+}
 
 func newTestConnector(t *testing.T, confSetup ...func(conf config.Section)) (context.Context, *ethConnector, *rpcbackendmocks.Backend, func()) {
 	ctx, c, mRPC, done := newTestConnectorWithNoBlockerFilterDefaultMocks(t, confSetup...)
@@ -64,13 +71,13 @@ func newTestConnectorWithNoBlockerFilterDefaultMocks(t *testing.T, confSetup ...
 		fn(conf)
 	}
 	ctx, done := context.WithCancel(context.Background())
-	cc, err := NewEthereumConnector(ctx, conf)
+	rpc, err := ethrpc.NewClientWithBackends(ctx, ethrpc.RoutingModeHTTP, mRPC, nil)
+	require.NoError(t, err)
+	cc, err := NewEthereumConnectorWithRPC(ctx, conf, rpc)
 	assert.NoError(t, err)
 	assert.NotNil(t, cc.RPC())
 
 	c := cc.(*ethConnector)
-	c.backend = mRPC
-	cc.BlockListener().UTSetBackend(mRPC)
 	return ctx, c, mRPC, func() {
 		done()
 		mRPC.AssertExpectations(t)
@@ -87,12 +94,17 @@ func TestConnectorInit(t *testing.T) {
 	cc, err := NewEthereumConnector(context.Background(), conf)
 	assert.Regexp(t, "FF23025", err)
 
+	conf.Set(ffresty.HTTPConfigURL, "http://localhost:8545")
 	conf.Set(ChainTrackingMode, "wrong")
 	_, err = NewEthereumConnector(context.Background(), conf)
 	assert.Regexp(t, "FF23069.*wrong", err)
 
+	conf.Set(RPCRoutingMode, "wrong")
+	_, err = NewEthereumConnector(context.Background(), conf)
+	assert.Regexp(t, "FF23075.*wrong", err)
+
+	conf.Set(RPCRoutingMode, ethrpc.RoutingModeAuto)
 	conf.Set(ChainTrackingMode, "")
-	conf.Set(ffresty.HTTPConfigURL, "http://localhost:8545")
 	conf.Set(WebSocketsEnabled, true)
 	conf.Set(EventsCatchupThreshold, 1)
 	conf.Set(EventsCatchupPageSize, 500)
@@ -237,7 +249,7 @@ func TestRetryDefaultsFor429(t *testing.T) {
 	cc, err := NewEthereumConnector(ctx, conf)
 	assert.NoError(t, err)
 	assert.NotNil(t, cc.RPC())
-	assert.Nil(t, cc.WSRPC())
+	assert.False(t, cc.RPC().HasWebSocket())
 	defer done()
 
 	// Start a simple HTTP server that always replies with 429 Too Many Requests
