@@ -37,6 +37,7 @@ const (
 	EventsCheckpointBlockGap    = "events.checkpointBlockGap"
 	EventsBlockTimestamps       = "events.blockTimestamps"
 	EventsFilterPollingInterval = "events.filterPollingInterval"
+	EventsFilterPollingMode     = "events.filterPollingMode"
 	RetryInitDelay              = "queryLoopRetry.initialDelay"
 	RetryMaxDelay               = "queryLoopRetry.maxDelay"
 	RetryFactor                 = "queryLoopRetry.factor"
@@ -55,6 +56,19 @@ const (
 	RPCRoutingMode                = "rpcRoutingMode"
 	MaxAsyncBlockFetchConcurrency = "maxAsyncBlockFetchConcurrency"
 	UseGetBlockReceipts           = "useGetBlockReceipts"
+)
+
+// filterPollingMode determines how the steady state loop of an event stream polls for new events,
+// once it has caught up with the head of the chain.
+type filterPollingMode string
+
+const (
+	// FilterPollingModeServer uses a node-side filter, established with eth_newFilter and polled
+	// with eth_getFilterChanges, so the node tracks which logs are new since the last poll
+	FilterPollingModeServer filterPollingMode = "server"
+	// FilterPollingModeClient uses stateless eth_getLogs range queries, with the connector tracking
+	// its own in-memory poll position - avoiding node-side filter state entirely
+	FilterPollingModeClient filterPollingMode = "client"
 )
 
 const (
@@ -84,6 +98,7 @@ func InitConfig(conf config.Section) {
 	conf.AddKnownKey(ConfigGasEstimationFactor, DefaultGasEstimationFactor)
 	conf.AddKnownKey(EventsBlockTimestamps, true)
 	conf.AddKnownKey(EventsFilterPollingInterval, "1s")
+	conf.AddKnownKey(EventsFilterPollingMode, string(FilterPollingModeServer))
 	conf.AddKnownKey(EventsCatchupPageSize, DefaultCatchupPageSize)
 	conf.AddKnownKey(EventsCatchupThreshold, DefaultEventsCatchupThreshold)
 	conf.AddKnownKey(EventsCatchupDownscaleRegex, DefaultEventsCatchupDownscaleRegex)

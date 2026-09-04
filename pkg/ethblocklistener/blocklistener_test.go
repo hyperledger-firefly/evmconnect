@@ -1262,6 +1262,9 @@ func TestBlockListenerHeadBlockNumber_DispatchesAndSkipsDuplicateHead(t *testing
 	<-bl.listenLoopDone
 
 	assert.Equal(t, uint64(1001), bl.currentChainHead)
+	// GetHighestBlock must track the live head in light mode too (not freeze at the startup height),
+	// as it drives the poll position of event streams
+	assert.Equal(t, uint64(1001), bl.highestBlock)
 	mRPC.AssertExpectations(t)
 }
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -272,8 +273,16 @@ func (es *eventStream) leadGroupCatchup() bool {
 			}
 		}
 
-		// Check if we're ready to exit catchup mode
-		headGap := (int64(chainHeadBlock) - fromBlock) //nolint:gosec // convert to int64 to match the type of headGap
+		// Catchup only polls blocks that are outside the re-org unstable window at the head of
+		// the chain (checkpointBlockGap behind the head).
+		// The steady-state loops own delivery of the unstable window.
+		// We stop on the first page where the end lands between catchupThreshold+checkpointBlockGap
+		// (say 550) and the checkpointBlockGap (say 50) before the head to do the switch.
+		pollableHead := blockNumberToInt64(chainHeadBlock) - es.c.checkpointBlockGap
+		if pollableHead < 0 {
+			pollableHead = 0
+		}
+		headGap := pollableHead - fromBlock
 		if headGap < es.c.catchupThreshold {
 			log.L(es.ctx).Infof("Stream head is up to date with chain fromBlock=%d chainHead=%d headGap=%d", fromBlock, chainHeadBlock, headGap)
 			return false
@@ -281,6 +290,9 @@ func (es *eventStream) leadGroupCatchup() bool {
 
 		// Poll in the range for events
 		toBlock := fromBlock + es.c.catchupPageSize - 1
+		if toBlock > pollableHead {
+			toBlock = pollableHead
+		}
 		events, err := es.getBlockRangeEvents(es.ctx, ag, fromBlock, toBlock)
 		if err != nil {
 			log.L(es.ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d headBlock=%d: %s", fromBlock, toBlock, chainHeadBlock, err)
@@ -289,8 +301,12 @@ func (es *eventStream) leadGroupCatchup() bool {
 		}
 		log.L(es.ctx).Infof("Stream catchup fromBlock=%d toBlock=%d headBlock=%d events=%d listeners=%d", fromBlock, toBlock, chainHeadBlock, len(events), len(ag.listeners))
 
+		// The poll position never enters the unstable window, so the HWM for the restart
+		// checkpoint is simply the next block to poll
+		hwmBlock := toBlock + 1
+
 		// Dispatch the events
-		if es.dispatchSetHWMCheckExit(ag, events, toBlock+1 /* hwm is the next block after our poll */) {
+		if es.dispatchSetHWMCheckExit(ag, events, hwmBlock) {
 			log.L(es.ctx).Debugf("Stream catchup loop exiting")
 			return true
 		}
@@ -338,7 +354,7 @@ func (es *eventStream) leadGroupSteadyState() bool {
 			// High water mark is a point safely behind the head of the chain in this case,
 			// where re-orgs are not expected.
 			bh, _ := es.c.blockListener.GetHighestBlock(es.ctx) /* note we know we're initialized here and will not block */
-			hwmBlock := int64(bh) - es.c.checkpointBlockGap     //nolint:gosec // convert to int64 to match the type of hwmBlock
+			hwmBlock := blockNumberToInt64(bh) - es.c.checkpointBlockGap
 			if hwmBlock < 0 {
 				hwmBlock = 0
 			}
@@ -359,9 +375,12 @@ func (es *eventStream) leadGroupSteadyState() bool {
 					}
 				}
 
-				// Check we're not outside of the steady state window, and need to fall back to catchup mode
+				// Check we're not outside of the steady state window, and need to fall back to
+				// catchup mode. Catchup only polls up to the stability horizon (checkpointBlockGap
+				// behind the head), so we measure against the same point - the two loops can never
+				// disagree and bounce control between each other.
 				chainHeadBlock, _ := es.c.blockListener.GetHighestBlock(es.ctx) /* note we know we're initialized here and will not block */
-				blockGapEstimate := (int64(chainHeadBlock) - fromBlock)         //nolint:gosec // convert to int64 to match the type of blockGapEstimate
+				blockGapEstimate := (blockNumberToInt64(chainHeadBlock) - es.c.checkpointBlockGap - fromBlock)
 				if blockGapEstimate > es.c.catchupThreshold {
 					log.L(es.ctx).Warnf("Block gap estimate reached %d (above threshold of %d) - reverting to catchup mode", blockGapEstimate, es.c.catchupThreshold)
 					return false
@@ -429,6 +448,17 @@ func (es *eventStream) leadGroupSteadyState() bool {
 	}
 }
 
+// blockNumberToInt64 converts a block number from the node into the int64 type we use for all
+// block range arithmetic, with a bounds check to avoid wraparound. A block number large enough
+// to overflow an int64 cannot occur on a real chain and cannot be handled, so a panic is
+// acceptable in that case.
+func blockNumberToInt64(blockNumber uint64) int64 {
+	if blockNumber > math.MaxInt64 {
+		panic(fmt.Sprintf("block number %d too large", blockNumber))
+	}
+	return int64(blockNumber)
+}
+
 func (es *eventStream) preStartProcessing() {
 	ctx := es.ctx
 	chainHead, ok := es.c.blockListener.GetHighestBlock(ctx)
@@ -439,7 +469,7 @@ func (es *eventStream) preStartProcessing() {
 	// The lead group never advances past checkpointBlockGap behind the chain head, as those blocks
 	// are re-org unstable. We establish our head position on the same basis, so that a listener
 	// held in catchup clamps against a safe ceiling from the moment it is established.
-	safeHead := int64(chainHead) - es.c.checkpointBlockGap //nolint:gosec // convert to int64 to match the type of headBlock
+	safeHead := blockNumberToInt64(chainHead) - es.c.checkpointBlockGap
 	if safeHead < 0 {
 		safeHead = 0
 	}
@@ -489,7 +519,13 @@ func (es *eventStream) streamLoop() {
 
 		// We then transition to our steady state, filtering from the front of the chain.
 		// But we might fall behind and need to go back to the catchup mode.
-		if es.leadGroupSteadyState() {
+		var exiting bool
+		if es.c.eventFilterPollingMode == FilterPollingModeClient {
+			exiting = es.leadGroupSteadyStateGetLogs()
+		} else {
+			exiting = es.leadGroupSteadyState()
+		}
+		if exiting {
 			return
 		}
 	}
@@ -582,7 +618,7 @@ func (es *eventStream) filterEnrichSort(ctx context.Context, ag *aggregatedListe
 	return updates, nil
 }
 
-func (es *eventStream) getBlockRangeEvents(ctx context.Context, ag *aggregatedListener, fromBlock, toBlock int64) (ffcapi.ListenerEvents, error) {
+func (es *eventStream) getBlockRangeLogs(ctx context.Context, ag *aggregatedListener, fromBlock, toBlock int64) ([]*ethrpc.LogJSONRPC, error) {
 	var ethLogs []*ethrpc.LogJSONRPC
 	logFilterJSONRPCReq := &ethrpc.LogFilterJSONRPC{
 		FromBlock: ethtypes.NewHexInteger64(fromBlock),
@@ -599,6 +635,14 @@ func (es *eventStream) getBlockRangeEvents(ctx context.Context, ag *aggregatedLi
 	rpcErr := es.c.rpc.CallRPC(ctx, &ethLogs, "eth_getLogs", logFilterJSONRPCReq)
 	if rpcErr != nil {
 		return nil, rpcErr.Error()
+	}
+	return ethLogs, nil
+}
+
+func (es *eventStream) getBlockRangeEvents(ctx context.Context, ag *aggregatedListener, fromBlock, toBlock int64) (ffcapi.ListenerEvents, error) {
+	ethLogs, err := es.getBlockRangeLogs(ctx, ag, fromBlock, toBlock)
+	if err != nil {
+		return nil, err
 	}
 	return es.filterEnrichSort(ctx, ag, ethLogs)
 }

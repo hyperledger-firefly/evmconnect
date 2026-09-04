@@ -114,7 +114,7 @@ func (l *listener) ensureHWM(ctx context.Context) error {
 			return err
 		}
 		// HWM is the configured fromBlock
-		l.hwmBlock = int64(firstBlock) //nolint:gosec // convert to int64 to match the type of hwmBlock, we should change the type of hwmBlock to uint64
+		l.hwmBlock = blockNumberToInt64(firstBlock)
 	}
 	return nil
 }
