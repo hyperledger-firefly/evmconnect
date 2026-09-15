@@ -598,8 +598,16 @@ func (es *eventStream) buildAggregatedListener(listeners []*listener) *aggregate
 	}
 	for _, l := range listeners {
 		ag.listenersByID[*l.id] = l
+		addedTopics := make(map[string]bool, len(l.config.filters))
 		for _, f := range l.config.filters {
 			sigStr := f.Topic0.String()
+			if addedTopics[sigStr] {
+				// Multiple filters on this listener share the same topic0 (e.g. same event on different
+				// addresses) - only add the listener to the bucket once, as filterEnrichSort checks all of
+				// the listener's filters anyway. Otherwise the listener is matched, and the event dispatched, twice.
+				continue
+			}
+			addedTopics[sigStr] = true
 			topicListeners, existing := ag.listenersByTopic0[sigStr]
 			if !existing {
 				ag.signatureSet = append(ag.signatureSet, f.Topic0)
