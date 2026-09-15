@@ -242,6 +242,47 @@ func TestReconcileConfirmationsForTransaction_HeadBlockNumber_ReceiptRPCError(t 
 	assert.Nil(t, receipt)
 }
 
+func TestReconcileConfirmationsForTransaction_ZeroConfirmationCount_ReceiptNotFound(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+	defer done()
+
+	txHash := generateTestHash(100).String()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", txHash).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			err := json.Unmarshal([]byte("null"), args[1])
+			assert.NoError(t, err)
+		})
+
+	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), txHash, nil, 0)
+	assert.Regexp(t, "FF23061", err)
+	assert.Nil(t, result)
+	assert.Nil(t, receipt)
+
+	mRPC.AssertExpectations(t)
+}
+
+func TestReconcileConfirmationsForTransaction_HeadBlockNumber_ReceiptNotFound(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t, headBlockNumberTestConf)
+	defer done()
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", headModeSampleTxHash).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			err := json.Unmarshal([]byte("null"), args[1])
+			assert.NoError(t, err)
+		})
+
+	bl.currentChainHead = 2000
+
+	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), headModeSampleTxHash, nil, 5)
+	assert.Regexp(t, "FF23061", err)
+	assert.Nil(t, result)
+	assert.Nil(t, receipt)
+
+	mRPC.AssertExpectations(t)
+}
+
 func TestReconcileConfirmationsForTransaction_ReceiptRPCCallError(t *testing.T) {
 
 	_, bl, mRPC, done := newTestBlockListener(t)
