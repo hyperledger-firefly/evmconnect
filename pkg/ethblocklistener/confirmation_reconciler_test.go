@@ -242,6 +242,59 @@ func TestReconcileConfirmationsForTransaction_HeadBlockNumber_ReceiptRPCError(t 
 	assert.Nil(t, receipt)
 }
 
+func TestReconcileConfirmationsForTransaction_ZeroConfirmationCount_ReceiptNotFound(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+	defer done()
+
+	txHash := generateTestHash(100).String()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", txHash).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			err := json.Unmarshal([]byte("null"), args[1])
+			assert.NoError(t, err)
+		})
+
+	// A receipt that is not available yet is not an error - the transaction simply is not mined,
+	// so we report it as unconfirmed and let the caller poll again.
+	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), txHash, nil, 0)
+	assert.NoError(t, err)
+	assert.Nil(t, receipt)
+	if assert.NotNil(t, result) {
+		assert.False(t, result.Confirmed)
+		assert.Equal(t, uint64(0), result.CurrentConfirmationCount)
+		assert.Equal(t, uint64(0), result.TargetConfirmationCount)
+	}
+
+	mRPC.AssertExpectations(t)
+}
+
+func TestReconcileConfirmationsForTransaction_HeadBlockNumber_ReceiptNotFound(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t, headBlockNumberTestConf)
+	defer done()
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", headModeSampleTxHash).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			err := json.Unmarshal([]byte("null"), args[1])
+			assert.NoError(t, err)
+		})
+
+	bl.currentChainHead = 2000
+
+	// A receipt that is not available yet is not an error - the transaction simply is not mined,
+	// so we report zero of the target confirmations rather than failing the reconciliation.
+	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), headModeSampleTxHash, nil, 5)
+	assert.NoError(t, err)
+	assert.Nil(t, receipt)
+	if assert.NotNil(t, result) {
+		assert.False(t, result.Confirmed)
+		assert.Equal(t, uint64(0), result.CurrentConfirmationCount)
+		assert.Equal(t, uint64(5), result.TargetConfirmationCount)
+	}
+
+	mRPC.AssertExpectations(t)
+}
+
 func TestReconcileConfirmationsForTransaction_ReceiptRPCCallError(t *testing.T) {
 
 	_, bl, mRPC, done := newTestBlockListener(t)
