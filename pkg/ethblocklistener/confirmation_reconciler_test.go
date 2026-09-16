@@ -254,10 +254,16 @@ func TestReconcileConfirmationsForTransaction_ZeroConfirmationCount_ReceiptNotFo
 			assert.NoError(t, err)
 		})
 
+	// A receipt that is not available yet is not an error - the transaction simply is not mined,
+	// so we report it as unconfirmed and let the caller poll again.
 	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), txHash, nil, 0)
-	assert.Regexp(t, "FF23061", err)
-	assert.Nil(t, result)
+	assert.NoError(t, err)
 	assert.Nil(t, receipt)
+	if assert.NotNil(t, result) {
+		assert.False(t, result.Confirmed)
+		assert.Equal(t, uint64(0), result.CurrentConfirmationCount)
+		assert.Equal(t, uint64(0), result.TargetConfirmationCount)
+	}
 
 	mRPC.AssertExpectations(t)
 }
@@ -275,10 +281,16 @@ func TestReconcileConfirmationsForTransaction_HeadBlockNumber_ReceiptNotFound(t 
 
 	bl.currentChainHead = 2000
 
+	// A receipt that is not available yet is not an error - the transaction simply is not mined,
+	// so we report zero of the target confirmations rather than failing the reconciliation.
 	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), headModeSampleTxHash, nil, 5)
-	assert.Regexp(t, "FF23061", err)
-	assert.Nil(t, result)
+	assert.NoError(t, err)
 	assert.Nil(t, receipt)
+	if assert.NotNil(t, result) {
+		assert.False(t, result.Confirmed)
+		assert.Equal(t, uint64(0), result.CurrentConfirmationCount)
+		assert.Equal(t, uint64(5), result.TargetConfirmationCount)
+	}
 
 	mRPC.AssertExpectations(t)
 }

@@ -51,7 +51,11 @@ func (bl *blockListener) ReconcileConfirmationsForTransaction(ctx context.Contex
 		}
 		if txReceipt == nil {
 			log.L(ctx).Debugf("Transaction receipt not yet available for tx hash %s", txHash)
-			return nil, nil, i18n.NewError(ctx, msgs.MsgTransactionNotFound, txHash)
+			return &ConfirmationUpdateResult{
+				Confirmed:                false,
+				TargetConfirmationCount:  0,
+				CurrentConfirmationCount: 0,
+			}, nil, nil
 		}
 		return &ConfirmationUpdateResult{
 			Confirmed:                true,
@@ -70,7 +74,11 @@ func (bl *blockListener) ReconcileConfirmationsForTransaction(ctx context.Contex
 		}
 		if txReceipt == nil {
 			log.L(ctx).Debugf("Transaction receipt not yet available for tx hash %s", txHash)
-			return nil, nil, i18n.NewError(ctx, msgs.MsgTransactionNotFound, txHash)
+			return &ConfirmationUpdateResult{
+				Confirmed:                false,
+				TargetConfirmationCount:  targetConfirmationCount,
+				CurrentConfirmationCount: 0,
+			}, nil, nil
 		}
 		// compare it against the chain head
 		chainHead := bl.GetHeadBlockNumber(ctx)
