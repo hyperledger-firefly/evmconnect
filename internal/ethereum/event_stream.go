@@ -607,12 +607,12 @@ func (es *eventStream) buildAggregatedListener(listeners []*listener) *aggregate
 				// the listener's filters anyway. Otherwise the listener is matched, and the event dispatched, twice.
 				continue
 			}
-			addedTopics[sigStr] = true
 			topicListeners, existing := ag.listenersByTopic0[sigStr]
 			if !existing {
 				ag.signatureSet = append(ag.signatureSet, f.Topic0)
 			}
 			ag.listenersByTopic0[sigStr] = append(topicListeners, l)
+			addedTopics[sigStr] = true
 		}
 	}
 	return ag
