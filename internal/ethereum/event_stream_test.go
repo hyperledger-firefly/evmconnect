@@ -1244,6 +1244,66 @@ func TestDispatchListenerDone(t *testing.T) {
 
 }
 
+func TestFilterEnrichSortDedupesListenerWithMultipleFiltersSameTopic0(t *testing.T) {
+
+	_, conn, mRPC, done := newTestConnector(t)
+	defer done()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "net_version", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = "1"
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionByHash", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.TxInfoJSONRPC) = &ethrpc.TxInfoJSONRPC{BlockNumber: ethtypes.HexUint64(100)}
+	}).Maybe()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByHash", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{
+			BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{Number: ethtypes.HexUint64(100)},
+		}
+	}).Maybe()
+
+	var transferEvent *abi.Entry
+	require.NoError(t, json.Unmarshal([]byte(abiTransferEvent), &transferEvent))
+	topic0 := ethtypes.MustNewHexBytes0xPrefix("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+	addr1 := ethtypes.MustNewAddress("0x1111111111111111111111111111111111111111")
+	addr2 := ethtypes.MustNewAddress("0x2222222222222222222222222222222222222222")
+
+	es := &eventStream{ctx: context.Background(), c: conn}
+	l := &listener{
+		id: fftypes.NewUUID(),
+		es: es,
+		ee: &eventEnricher{connector: conn},
+		config: listenerConfig{
+			// Same event on two different addresses - shares one topic0 across two filters
+			filters: []*eventFilter{
+				{Event: transferEvent, Topic0: topic0, Address: addr1},
+				{Event: transferEvent, Topic0: topic0, Address: addr2},
+			},
+			options: &listenerOptions{},
+		},
+	}
+	ag := es.buildAggregatedListener([]*listener{l})
+
+	// A single log matching only the second filter's address
+	ethLog := &ethrpc.LogJSONRPC{
+		Address: addr2,
+		Topics: []ethtypes.HexBytes0xPrefix{
+			topic0,
+			ethtypes.MustNewHexBytes0xPrefix("0x0000000000000000000000003968ef051b422d3d1cdc182a88bba8dd922e6fa4"),
+			ethtypes.MustNewHexBytes0xPrefix("0x000000000000000000000000d0f2f5103fd050739a9fb567251bc460cc24d091"),
+		},
+		Data:             ethtypes.MustNewHexBytes0xPrefix("0x00000000000000000000000000000000000000000000000000000000000003e8"),
+		BlockNumber:      ethtypes.HexUint64(100),
+		TransactionIndex: ethtypes.HexUint64(1),
+		LogIndex:         ethtypes.HexUint64(0),
+	}
+
+	updates, err := es.filterEnrichSort(context.Background(), ag, []*ethrpc.LogJSONRPC{ethLog})
+	require.NoError(t, err)
+	// Without the dedup in buildAggregatedListener, the listener would appear twice in the
+	// topic0 bucket (once per filter) and this log would be matched and dispatched twice
+	assert.Len(t, updates, 1)
+
+}
+
 func TestGetListenerHWMNotFound(t *testing.T) {
 
 	es := &eventStream{
