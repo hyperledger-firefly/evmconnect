@@ -102,4 +102,16 @@ var (
 	_ = ffm("BlockInfoJSONRPC.transactions", `Array - Array of transaction objects, or 32 Bytes transaction hashes depending on the last given parameter.`)
 	_ = ffm("BlockInfoJSONRPC.uncles", `Array - Array of uncle hashes.`)
 	_ = ffm("BlockInfoJSONRPC.baseFeePerGas", `QUANTITY - the market price for gas`)
+
+	_ = ffm("MinimalBlockInfo.blockNumber", `QUANTITY - the block number.`)
+	_ = ffm("MinimalBlockInfo.blockHash", `DATA, 32 Bytes - hash of the block.`)
+	_ = ffm("MinimalBlockInfo.parentHash", `DATA, 32 Bytes - hash of the parent block.`)
+
+	_ = ffm("ConfirmationUpdateResult.confirmations", `The accumulated confirmation list for the transaction, sorted by block number, starting with the block containing the transaction.`)
+	_ = ffm("ConfirmationUpdateResult.rebuilt", ` true when the supplied existing confirmations contained invalid blocks, and the confirmation list was rebuilt from scratch.`)
+	_ = ffm("ConfirmationUpdateResult.newFork", `true when a new fork was detected, relative to the supplied existing confirmations.`)
+	_ = ffm("ConfirmationUpdateResult.confirmed", `true when the confirmation list is complete, and the transaction is confirmed.`)
+	_ = ffm("ConfirmationUpdateResult.targetConfirmationCount", `The target number of confirmations for this reconcile request.`)
+	_ = ffm("ConfirmationUpdateResult.currentConfirmationCount", `The current number of confirmations for this reconcile request.`)
+	_ = ffm("ConfirmationUpdateResult.txnBlockTimestamp", `The on-chain timestamp of the block the transaction was included in. Only populated in "full" chain tracking mode.`)
 )
