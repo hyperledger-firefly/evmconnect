@@ -221,9 +221,9 @@ func (bi *BlockInfoJSONRPC) SupportsEIP1559() bool {
 }
 
 type MinimalBlockInfo struct { // duplicate of apitypes.Confirmation due to circular dependency
-	BlockNumber fftypes.FFuint64          `json:"blockNumber"`
-	BlockHash   ethtypes.HexBytes0xPrefix `json:"blockHash"`
-	ParentHash  ethtypes.HexBytes0xPrefix `json:"parentHash"`
+	BlockNumber fftypes.FFuint64          `json:"blockNumber" ffstruct:"MinimalBlockInfo"`
+	BlockHash   ethtypes.HexBytes0xPrefix `json:"blockHash" ffstruct:"MinimalBlockInfo"`
+	ParentHash  ethtypes.HexBytes0xPrefix `json:"parentHash" ffstruct:"MinimalBlockInfo"`
 }
 
 func (bi *BlockInfoJSONRPC) ToMinimalBlockInfo() *MinimalBlockInfo {

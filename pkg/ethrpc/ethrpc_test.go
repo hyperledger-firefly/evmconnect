@@ -381,4 +381,5 @@ func TestABIDocumented(t *testing.T) {
 	ffapi.CheckObjectDocumented(&BlockHeaderJSONRPC{})
 	ffapi.CheckObjectDocumented(&EVMBlockWithTxHashesJSONRPC{})
 	ffapi.CheckObjectDocumented(&EVMBlockWithTransactionsJSONRPC{})
+	ffapi.CheckObjectDocumented(&MinimalBlockInfo{})
 }
