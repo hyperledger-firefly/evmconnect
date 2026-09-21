@@ -242,6 +242,22 @@ func TestReconcileConfirmationsForTransaction_HeadBlockNumber_ReceiptRPCError(t 
 	assert.Nil(t, receipt)
 }
 
+func TestReconcileConfirmationsForTransaction_ZeroConfirmationCount_ReceiptRPCError(t *testing.T) {
+	_, bl, mRPC, done := newTestBlockListener(t)
+	defer done()
+
+	txHash := generateTestHash(100).String()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", txHash).
+		Return(&rpcbackend.RPCError{Message: "pop"})
+
+	result, receipt, err := bl.ReconcileConfirmationsForTransaction(context.Background(), txHash, nil, 0)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Nil(t, receipt)
+
+	mRPC.AssertExpectations(t)
+}
+
 func TestReconcileConfirmationsForTransaction_ZeroConfirmationCount_ReceiptNotFound(t *testing.T) {
 	_, bl, mRPC, done := newTestBlockListener(t)
 	defer done()

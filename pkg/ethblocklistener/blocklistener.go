@@ -30,7 +30,6 @@ import (
 	"github.com/hyperledger-firefly/common/pkg/retry"
 	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
 	"github.com/hyperledger-firefly/evmconnect/internal/retryutil"
-	"github.com/hyperledger-firefly/evmconnect/pkg/etherrors"
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
 	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
@@ -57,6 +56,18 @@ type ConfirmationUpdateResult struct {
 	TxnBlockTimestamp        *ethtypes.HexUint64        `json:"txnBlockTimestamp,omitempty"` // the on-chain timestamp of the block the transaction was included in - not a confirmation-finality guarantee, this can change if the chain forks before Confirmed becomes true. Only populated in "full" chain tracking mode, since "light" mode never fetches a block
 }
 
+// FilterPollingMode determines how new blocks are discovered by the listen loop
+type FilterPollingMode string
+
+const (
+	// FilterPollingModeServer establishes a node-side filter with eth_newBlockFilter and polls it
+	// with eth_getFilterChanges, so the node tracks which blocks are new since the last poll
+	FilterPollingModeServer FilterPollingMode = "server"
+	// FilterPollingModeClient polls the head block with eth_getBlockByNumber and reconciles it into the
+	// canonical chain, which fills any gap or re-org itself - avoiding node-side filter state entirely
+	FilterPollingModeClient FilterPollingMode = "client"
+)
+
 type BlockListenerConfig struct {
 	MonitoredHeadLength           int                      `json:"monitoredHeadLength"`
 	BlockPollingInterval          time.Duration            `json:"blockPollingInterval"`
@@ -68,6 +79,7 @@ type BlockListenerConfig struct {
 	UseGetBlockReceipts           bool                     `json:"useGetBlockReceipts"`
 	MaxAsyncBlockFetchConcurrency int                      `json:"maxAsyncBlockFetchConcurrency"`
 	ChainTrackingMode             ffcapi.ChainTrackingMode `json:"chainTrackingMode,omitempty"`
+	FilterPollingMode             FilterPollingMode        `json:"filterPollingMode,omitempty"`
 }
 
 type BlockListener interface {
@@ -153,6 +165,9 @@ func NewBlockListener(ctx context.Context, retry *retry.Retry, conf *BlockListen
 	if conf.ChainTrackingMode == "" {
 		conf.ChainTrackingMode = ffcapi.ChainTrackingModeFull
 	}
+	if conf.FilterPollingMode == "" {
+		conf.FilterPollingMode = FilterPollingModeServer
+	}
 	ctx = log.WithLogFields(ctx, "role", "blocklistener")
 	bl := &blockListener{
 		ctx:                           ctx,
@@ -192,16 +207,14 @@ func (bl *blockListener) GetMonitoredHeadLength() int {
 }
 
 // seedMonitoredHead backfills the whole monitored window, from highestBlock-MonitoredHeadLength+1
-// up to highestBlock, before the listen loop's first iteration. Without this, the window would
-// otherwise only reach full length as new blocks arrive on the live block filter created just
-// after this returns - one block at a time, paced by real chain block production rather than by
-// polling interval. On a chain with slow block times that leaves full chain-tracking mode's
-// client-side getLogs polling (steadyStateScanCeiling) holding its scan back for a long time
+// up to highestBlock, before the listen loop starts. Without this, the window would otherwise only
+// reach full length as new blocks arrive - one block at a time, paced by real chain block production
+// rather than by polling interval. On a chain with slow block times that leaves full chain-tracking
+// mode's client-side getLogs polling (steadyStateScanCeiling) holding its scan back for a long time
 // right after startup, while confirmations and re-org repair for that whole window are unavailable.
 //
-// The last (highestBlock itself) is always fetched and returned for the listen loop to reconcile on
-// its first iteration.
-func (bl *blockListener) seedMonitoredHead() *ethrpc.BlockInfoJSONRPC {
+// Nothing is dispatched to consumers - none can have been added before the listener is marked started.
+func (bl *blockListener) seedMonitoredHead() {
 	bl.canonicalChainLock.RLock()
 	highestBlockSet := bl.highestBlockSet
 	highestBlock := bl.highestBlock
@@ -212,39 +225,23 @@ func (bl *blockListener) seedMonitoredHead() *ethrpc.BlockInfoJSONRPC {
 	bl.canonicalChainLock.RUnlock()
 
 	if !highestBlockSet {
-		return nil
+		return
 	}
 
-	fetchBlock := func(blockNumber uint64) *ethrpc.BlockInfoJSONRPC {
+	for blockNumber := startBlock; blockNumber <= highestBlock; blockNumber++ {
 		var bi *ethrpc.BlockInfoJSONRPC
 		if err := bl.retry.Do(bl.ctx, "seed monitored head", func(_ int) (retry bool, err error) {
 			bi, err = bl.GetBlockInfoByNumber(bl.ctx, blockNumber, false, "", "")
 			return err != nil, err
 		}); err != nil || bi == nil {
-			log.L(bl.ctx).Warnf("Failed to seed monitored head at block %d: %v", blockNumber, err)
-			return nil
-		}
-		return bi
-	}
-
-	for blockNumber := startBlock; blockNumber < highestBlock; blockNumber++ {
-		bi := fetchBlock(blockNumber)
-		if bi == nil {
 			// Give up on the backfill and fall back to the original slow-fill behavior - the
-			// live filter will still extend the window forward from whatever it has reached
-			return nil
+			// live poll will still extend the window forward from whatever it has reached
+			log.L(bl.ctx).Warnf("Failed to seed monitored head at block %d: %v", blockNumber, err)
+			return
 		}
 		bl.reconcileCanonicalChain(bi)
 	}
-
-	// the last block is still returned for the listen loop's first iteration to reconcile as before
-	// preserving existing notification timing
-	bi := fetchBlock(highestBlock)
-	if bi == nil {
-		return nil
-	}
 	log.L(bl.ctx).Infof("Seeded monitored head from block %d to %d", startBlock, highestBlock)
-	return bi
 }
 
 // setting block filter status updates that new block filter has been created
@@ -340,161 +337,38 @@ func (bl *blockListener) listenLoop() {
 		log.L(bl.ctx).Warnf("Block listener exiting before establishing initial block height: %s", err)
 	}
 
-	// Seed the canonical chain before starting the filter loop (not applicable in light mode).
-	// The seed block is reconciled on the first loop iteration instead of polling the filter,
-	// so the in-memory chain is pre-populated and confirmations can be delivered immediately.
-	var seedBi *ethrpc.BlockInfoJSONRPC
-	if bl.ChainTrackingMode != ffcapi.ChainTrackingModeLight {
-		seedBi = bl.seedMonitoredHead()
-	}
-
-	var filter string
+	poller := bl.newBlockPoller()
 	failCount := 0
-	gapPotential := true
-	firstIteration := true
-	for {
-		if failCount > 0 {
-			if bl.retry.DoFailureDelay(bl.ctx, failCount) {
-				log.L(bl.ctx).Debugf("Block listener loop exiting")
-				return
-			}
+	for firstIteration := true; bl.waitNextPoll(failCount, firstIteration); firstIteration = false {
+		if poller.poll() != nil {
+			failCount++
 		} else {
-			// Sleep for the polling interval, or until we're shoulder tapped by the newHeads listener
-			if !firstIteration {
-				if !bl.waitNextIteration() {
-					log.L(bl.ctx).Debugf("Block listener loop stopping")
-					return
-				}
-			} else {
-				firstIteration = false
-			}
-		}
-
-		// In full chain tracking mode, the loop below never queries the height the node reports, so we refresh
-		// it here for the target metric. Done ahead of the filter calls.
-		if bl.ChainTrackingMode != ffcapi.ChainTrackingModeLight {
-			bl.refreshTargetBlockHeightMetric()
-		}
-
-		if filter == "" {
-			err := bl.rpc.CallRPC(bl.ctx, &filter, "eth_newBlockFilter")
-			if err != nil {
-				log.L(bl.ctx).Errorf("Failed to establish new block filter: %s", err.Message)
-				bl.incPollFailureMetric("eth_newBlockFilter")
-				failCount++
-				continue
-			}
-			bl.markStarted()
-		}
-
-		// On the first iteration use the seed block (leaves blockHashes nil).
-		// On subsequent iterations poll the filter for new block hashes.
-		var blockHashes []ethtypes.HexBytes0xPrefix
-		var notifyPos *list.Element
-		if seedBi != nil {
-			notifyPos = bl.reconcileCanonicalChain(seedBi)
-			seedBi = nil
-		} else {
-			rpcErr := bl.rpc.CallRPC(bl.ctx, &blockHashes, "eth_getFilterChanges", filter)
-			if rpcErr != nil {
-				if etherrors.MapError(etherrors.FilterRPCMethods, rpcErr.Error()) == ffcapi.ErrorReasonNotFound {
-					log.L(bl.ctx).Warnf("Block filter '%v' no longer valid. Recreating filter: %s", filter, rpcErr.Message)
-					filter = ""
-					gapPotential = true
-				}
-				log.L(bl.ctx).Errorf("Failed to query block filter changes: %s", rpcErr.Message)
-				bl.incPollFailureMetric("eth_getFilterChanges")
-				failCount++
-				continue
-			}
-			log.L(bl.ctx).Debugf("Block filter received new block hashes: %+v", blockHashes)
-		}
-
-		if bl.ChainTrackingMode == ffcapi.ChainTrackingModeLight {
-			head, err := bl.queryBlockHeightFromRPC()
-			if err != nil {
-				log.L(bl.ctx).Errorf("Failed to refresh chain head: %s", err)
-				failCount++
-				continue
-			}
-			// In light mode there is no canonical chain being built, so the head we dispatch to
-			// consumers is what we report as the canonical height - both through GetHeadBlockNumber
-			// (used by FFTM's head-number confirmation checks) and GetHighestBlock (used by event streams)
-			if head == bl.currentChainHead {
-				failCount = 0
-				continue
-			}
-			bl.currentChainHead = head
-			bl.setHighestBlock(head)
-			update := &ffcapi.BlockHashEvent{GapPotential: false, Created: fftypes.Now(), HeadBlockNumber: bl.currentChainHead}
-			bl.consumerMux.Lock()
-			consumers := make([]*BlockUpdateConsumer, 0, len(bl.consumers))
-			for _, c := range bl.consumers {
-				consumers = append(consumers, c)
-			}
-			bl.consumerMux.Unlock()
-			bl.dispatchToConsumers(consumers, update)
 			failCount = 0
-			continue
 		}
-
-		update := &ffcapi.BlockHashEvent{GapPotential: gapPotential, Created: fftypes.Now()}
-		for _, h := range blockHashes {
-			if len(h) != 32 {
-				if !bl.HederaCompatibilityMode {
-					log.L(bl.ctx).Errorf("Attempted to index block header with non-standard length: %d", len(h))
-					failCount++
-					continue
-				}
-
-				if len(h) < 32 {
-					log.L(bl.ctx).Errorf("Cannot index block header hash of length: %d", len(h))
-					failCount++
-					continue
-				}
-
-				h = h[0:32]
-			}
-
-			// Do a lookup of the block (which will then go into our cache).
-			bi, err := bl.GetBlockInfoByHash(bl.ctx, h.String())
-			switch {
-			case err != nil:
-				log.L(bl.ctx).Debugf("Failed to query block '%s': %s", h, err)
-			case bi == nil:
-				log.L(bl.ctx).Debugf("Block '%s' no longer available after notification (assuming due to re-org)", h)
-			default:
-				candidate := bl.reconcileCanonicalChain(bi)
-				// Check this is the lowest position to notify from
-				if candidate != nil && (notifyPos == nil || candidate.Value.(*ethrpc.BlockInfoJSONRPC).Number.Uint64() <= notifyPos.Value.(*ethrpc.BlockInfoJSONRPC).Number.Uint64()) {
-					notifyPos = candidate
-				}
-			}
-		}
-		if notifyPos != nil {
-			// We notify for all hashes from the point of change in the chain onwards
-			for notifyPos != nil {
-				update.BlockHashes = append(update.BlockHashes, notifyPos.Value.(*ethrpc.BlockInfoJSONRPC).Hash.String())
-				notifyPos = notifyPos.Next()
-			}
-
-			// Take a copy of the consumers in the lock
-			bl.consumerMux.Lock()
-			consumers := make([]*BlockUpdateConsumer, 0, len(bl.consumers))
-			for _, c := range bl.consumers {
-				consumers = append(consumers, c)
-			}
-			bl.consumerMux.Unlock()
-
-			// Spin through delivering the block update
-			bl.dispatchToConsumers(consumers, update)
-		}
-
-		// Reset retry count when we have a full successful loop
-		failCount = 0
-		gapPotential = false
-
 	}
+	log.L(bl.ctx).Debugf("Block listener loop exiting")
+}
+
+// waitNextPoll backs off after a failure, otherwise sleeps for the polling interval (or until we're
+// shoulder tapped by the newHeads listener). Returns false when the listener is stopping.
+func (bl *blockListener) waitNextPoll(failCount int, firstIteration bool) bool {
+	if failCount > 0 {
+		return !bl.retry.DoFailureDelay(bl.ctx, failCount)
+	}
+	if firstIteration {
+		return true
+	}
+	return bl.waitNextIteration()
+}
+
+func (bl *blockListener) snapshotConsumers() []*BlockUpdateConsumer {
+	bl.consumerMux.Lock()
+	defer bl.consumerMux.Unlock()
+	consumers := make([]*BlockUpdateConsumer, 0, len(bl.consumers))
+	for _, c := range bl.consumers {
+		consumers = append(consumers, c)
+	}
+	return consumers
 }
 
 // reconcileCanonicalChain takes an update on a block, and reconciles it against the in-memory view of the

@@ -194,6 +194,7 @@ func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc e
 		MaxAsyncBlockFetchConcurrency: conf.GetInt(MaxAsyncBlockFetchConcurrency),
 		UseGetBlockReceipts:           conf.GetBool(UseGetBlockReceipts),
 		ChainTrackingMode:             c.chainTrackingMode,
+		FilterPollingMode:             c.eventFilterPollingMode,
 	}, c.rpc); err != nil {
 		return nil, err
 	}
