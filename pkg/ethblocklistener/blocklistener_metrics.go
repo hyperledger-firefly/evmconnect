@@ -28,11 +28,11 @@ import (
 const (
 	metricsSubsystem = "blocklistener"
 
-	// metricTargetBlockHeight is the block height the endpoint we are connected to reports via eth_blockNumber.
-	// Emitted from queryBlockHeightFromRPC, so it is always the value we last received from the node.
+	// metricTargetBlockHeight is the block height the endpoint we are connected to reports, via eth_blockNumber
+	// or (in client filter polling mode) the latest block poll - always the value we last received from the node.
 	metricTargetBlockHeight = "target_block_height"
 	// metricCanonicalBlockHeight is the head of the chain this listener is tracking - in full chain tracking
-	// mode the head of the in-memory canonical chain built from the block filter / newHeads subscription,
+	// mode the head of the in-memory canonical chain built from the block filter / latest block poll,
 	// and in light mode the head we dispatch to consumers. It should track the target height very closely.
 	metricCanonicalBlockHeight = "canonical_block_height"
 	// metricPollFailures counts the JSON/RPC polls the listen loop makes that failed, labelled by method.

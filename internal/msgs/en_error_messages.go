@@ -97,4 +97,5 @@ var (
 	MsgRPCClientClosed                          = ffe("FF23077", "The JSON/RPC client is closed")
 	MsgInvalidFilterPollingMode                 = ffe("FF23078", "Invalid filter polling mode '%s': must be 'server' or 'client'")
 	MsgCatchupPageSizeInvalid                   = ffe("FF23079", "Catchup page size must be greater than or equal to 1 value=%d")
+	MsgLatestBlockNotFound                      = ffe("FF23080", "The node returned no latest block")
 )
