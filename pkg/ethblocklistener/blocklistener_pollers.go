@@ -49,9 +49,9 @@ func (bl *blockListener) newBlockPoller() blockPoller {
 	bl.seedMonitoredHead()
 	if bl.FilterPollingMode == FilterPollingModeClient {
 		bl.markStarted()
-		return &latestBlockPoller{canonicalChainPoller{bl: bl, gapPotential: true}}
+		return &latestBlockPoller{canonicalChainPollerBase{bl: bl, gapPotential: true}}
 	}
-	return &blockFilterPoller{canonicalChainPoller: canonicalChainPoller{bl: bl, gapPotential: true}}
+	return &blockFilterPoller{canonicalChainPollerBase: canonicalChainPollerBase{bl: bl, gapPotential: true}}
 }
 
 // headNumberPoller is light chain tracking mode, in either filter polling mode. There is no canonical
@@ -79,14 +79,14 @@ func (p *headNumberPoller) poll() error {
 	return nil
 }
 
-// canonicalChainPoller is the part shared by the full chain tracking pollers: reconciling the blocks a
+// canonicalChainPollerBase is the part shared by the full chain tracking pollers: reconciling the blocks a
 // poll discovered into the canonical chain, and notifying consumers from the lowest changed position.
-type canonicalChainPoller struct {
+type canonicalChainPollerBase struct {
 	bl           *blockListener
 	gapPotential bool // true until the first successful poll, and again while a lost block filter is re-established
 }
 
-func (p *canonicalChainPoller) reconcileAndDispatch(blocks iter.Seq[*ethrpc.BlockInfoJSONRPC]) {
+func (p *canonicalChainPollerBase) reconcileAndDispatch(blocks iter.Seq[*ethrpc.BlockInfoJSONRPC]) {
 	bl := p.bl
 	var notifyPos *list.Element
 	for bi := range blocks {
@@ -109,7 +109,7 @@ func (p *canonicalChainPoller) reconcileAndDispatch(blocks iter.Seq[*ethrpc.Bloc
 // blockFilterPoller is full chain tracking with server filter polling mode: a node-side block filter
 // (re)established with eth_newBlockFilter, and polled with eth_getFilterChanges for new block hashes.
 type blockFilterPoller struct {
-	canonicalChainPoller
+	canonicalChainPollerBase
 	filter string
 }
 
@@ -191,7 +191,7 @@ func (bl *blockListener) resolveBlockHash(h ethtypes.HexBytes0xPrefix) *ethrpc.B
 // tail - a gap of blocks, or a re-org - is resolved by the chain rebuild in reconcileCanonicalChain,
 // exactly as when a block filter poll skips blocks.
 type latestBlockPoller struct {
-	canonicalChainPoller
+	canonicalChainPollerBase
 }
 
 func (p *latestBlockPoller) poll() error {
