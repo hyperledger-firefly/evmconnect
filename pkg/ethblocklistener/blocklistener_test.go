@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperledger-firefly/common/pkg/ffapi"
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/retry"
 	"github.com/hyperledger-firefly/common/pkg/wsclient"
@@ -1674,4 +1675,8 @@ func TestGetHighestBlockInfoCancelledBeforeInit(t *testing.T) {
 	require.False(t, ok)
 
 	<-bl.listenLoopDone
+}
+
+func TestTypesDocumented(t *testing.T) {
+	ffapi.CheckObjectDocumented(&ConfirmationUpdateResult{})
 }
