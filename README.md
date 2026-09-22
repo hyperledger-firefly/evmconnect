@@ -48,14 +48,19 @@ For EVM connector to function properly, you should check the blockchain node sup
 ### Event tracking
 
 - `eth_blockNumber`
-- `eth_newBlockFilter`
-- `eth_getFilterLogs`
-- `eth_getFilterChanges`
+- `eth_getBlockByNumber`
+- `eth_getBlockByHash`
 - `eth_getLogs`
-- `eth_newFilter`
-- `eth_uninstallFilter`
 - `eth_getTransactionByHash`
 - `eth_getTransactionReceipt`
+
+Additionally, when [connector.events.filterPollingMode](./config.md#connectorevents) is `server` (the default), node-side filters are used and the following are required (`eth_newBlockFilter` only with the default full `chainTrackingMode` - `light` mode polls `eth_blockNumber` for new blocks in either filter polling mode):
+
+- `eth_newBlockFilter`
+- `eth_newFilter`
+- `eth_getFilterLogs`
+- `eth_getFilterChanges`
+- `eth_uninstallFilter`
 
 ### Query
 

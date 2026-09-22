@@ -183,6 +183,37 @@ func TestBlockListenerMetricsFullMode(t *testing.T) {
 	waitForGaugeMetric(t, registry, metricCanonicalBlockHeight, 1001)
 }
 
+func TestBlockListenerMetricsClientMode(t *testing.T) {
+	blockHash1000 := testBlockHashFor(1000)
+	blockHash1001 := testBlockHashFor(1001)
+
+	ctx, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
+		conf.BlockPollingInterval = 1 * time.Millisecond
+		conf.FilterPollingMode = FilterPollingModeClient
+		// Only the startup height query - the target gauge is then driven by the latest block poll
+		mockInitialBlockHeight(mRPC, 1000)
+		mockSeedBlockNotFound(mRPC, 1000-uint64(conf.MonitoredHeadLength)+1)
+		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", "latest", false).Return(nil).Run(func(args mock.Arguments) {
+			*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{
+				BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{Number: 1001, Hash: blockHash1001, ParentHash: blockHash1000},
+			}
+		})
+	})
+	defer done()
+
+	registry := initTestMetrics(t, bl)
+
+	updates := make(chan *ffcapi.BlockHashEvent, 16)
+	bl.AddConsumer(ctx, &BlockUpdateConsumer{
+		ID:      fftypes.NewUUID(),
+		Ctx:     ctx,
+		Updates: updates,
+	})
+
+	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 1001)
+	waitForGaugeMetric(t, registry, metricCanonicalBlockHeight, 1001)
+}
+
 func TestBlockListenerMetricsFullModeFilterFail(t *testing.T) {
 	_, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
 		conf.BlockPollingInterval = 1 * time.Millisecond
@@ -216,8 +247,6 @@ func TestBlockListenerMetricsLightMode(t *testing.T) {
 		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
 			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(2000)
 		})
-		mockNewBlockFilter(mRPC, testBlockFilterID1)
-		mockFilterChangesEmpty(mRPC)
 	})
 	defer done()
 

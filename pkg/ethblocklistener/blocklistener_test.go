@@ -224,6 +224,36 @@ func mockBlockByNumber(mRPC *rpcbackendmocks.Backend, height uint64, hash *ethty
 	})
 }
 
+// mockLatestBlock mocks one eth_getBlockByNumber("latest") returning a block at height with the given hash and parent hash.
+// Pass nil hash to return nil (no block). Optionally waits on latch before returning.
+func mockLatestBlock(mRPC *rpcbackendmocks.Backend, height uint64, hash, parentHash ethtypes.HexBytes0xPrefix, latch *testLatch) *mock.Call {
+	return mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", "latest", false).Return(nil).Run(func(args mock.Arguments) {
+		if latch != nil {
+			latch.waitComplete()
+		}
+		if hash == nil {
+			return
+		}
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{
+			BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+				Number:     ethtypes.HexUint64(height),
+				Hash:       hash,
+				ParentHash: parentHash,
+			},
+		}
+	}).Once()
+}
+
+// mockLatestBlockParked mocks any further eth_getBlockByNumber("latest") calls returning an unchanged head,
+// so a test can stop the loop at any point after its scripted polls complete.
+func mockLatestBlockParked(mRPC *rpcbackendmocks.Backend, height uint64, hash, parentHash ethtypes.HexBytes0xPrefix) *mock.Call {
+	return mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", "latest", false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{
+			BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{Number: ethtypes.HexUint64(height), Hash: hash, ParentHash: parentHash},
+		}
+	}).Maybe()
+}
+
 // mockBlockRangeWithHash mocks sequential eth_getBlockByNumber and eth_getBlockByHash for heights start..end
 // using deterministic hashes from testBlockHashFor.
 func mockBlockRangeWithHash(mRPC *rpcbackendmocks.Backend, start, end uint64, mods ...uint64) {
@@ -240,6 +270,17 @@ func TestBlockListenerConstructorFailMonitoredHeadLength(t *testing.T) {
 		MonitoredHeadLength: -1,
 	}, nil)
 	require.Regexp(t, "FF23072", err)
+}
+
+func TestBlockListenerConstructorDefaultModes(t *testing.T) {
+	ibl, err := NewBlockListener(context.Background(), &retry.Retry{}, &BlockListenerConfig{
+		BlockCacheSize:      250,
+		MonitoredHeadLength: 1,
+	}, nil)
+	require.NoError(t, err)
+	bl := ibl.(*blockListener)
+	require.Equal(t, ffcapi.ChainTrackingModeFull, bl.ChainTrackingMode)
+	require.Equal(t, FilterPollingModeServer, bl.FilterPollingMode)
 }
 
 func TestBlockListenerConstructorFailCacheConfig(t *testing.T) {
@@ -320,8 +361,7 @@ func mockSeedBlockChain(mRPC *rpcbackendmocks.Backend, hashes map[uint64]ethtype
 }
 
 func TestBlockListenerSeedMonitoredHead_BlockFound(t *testing.T) {
-	// window is [998,1000] - 998 and 999 are backfilled internally (silently reconciled), and
-	// 1000 (highestBlock) is fetched and returned for the caller to reconcile as before
+	// window is [998,1000] - all three blocks are reconciled into the canonical chain, with no dispatch
 	hashes := testBlockChain(998, 1000)
 
 	_, bl, mRPC, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
@@ -335,25 +375,22 @@ func TestBlockListenerSeedMonitoredHead_BlockFound(t *testing.T) {
 	bl.highestBlockSet = true
 	bl.canonicalChainLock.Unlock()
 
-	bi := bl.seedMonitoredHead()
+	bl.seedMonitoredHead()
 
-	require.NotNil(t, bi)
-	assert.Equal(t, uint64(1000), bi.Number.Uint64())
-	assert.Equal(t, hashes[1000], bi.Hash)
-
-	// 998 and 999 were backfilled into the canonical chain view before this call returned
 	view := bl.SnapshotMonitoredHeadChain()
-	require.Len(t, view, 2)
+	require.Len(t, view, 3)
 	assert.Equal(t, uint64(998), view[0].Number.Uint64())
 	assert.Equal(t, uint64(999), view[1].Number.Uint64())
+	assert.Equal(t, uint64(1000), view[2].Number.Uint64())
+	assert.Equal(t, hashes[1000], view[2].Hash)
 
 	mRPC.AssertExpectations(t)
 }
 
-func TestBlockListenerSeedMonitoredHead_ReconcileAndDispatch(t *testing.T) {
-	// window is [998,1000] - only the final block (1000) generates a consumer notification,
-	// since 998 and 999 are backfilled silently before the listen loop's first iteration
-	hashes := testBlockChain(998, 1000)
+func TestBlockListenerSeedMonitoredHead_ThenFirstFilterEvent(t *testing.T) {
+	// window is [998,1000] - the seed is reconciled silently before the listen loop starts, so the
+	// first notification consumers see is the first block from the filter, chained onto the seed
+	hashes := testBlockChain(998, 1001)
 
 	_, bl, mRPC, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc) {
 		conf.BlockPollingInterval = shortDelay
@@ -362,10 +399,9 @@ func TestBlockListenerSeedMonitoredHead_ReconcileAndDispatch(t *testing.T) {
 		mockInitialBlockHeight(mRPC, 1000)
 		mockSeedBlockChain(mRPC, hashes, 998, 1000)
 		mockNewBlockFilter(mRPC, testBlockFilterID1).Once()
-		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getFilterChanges", testBlockFilterID1).Return(nil).Run(func(args mock.Arguments) {
-			*args[1].(*[]ethtypes.HexBytes0xPrefix) = nil
-			cancelCtx()
-		}).Maybe()
+		mockFilterChanges(mRPC, testBlockFilterID1, nil, hashes[1001]).Once()
+		mockFilterChangesEmpty(mRPC, cancelCtx)
+		mockBlockByHash(mRPC, 1001, hashes[1001], hashes[1000])
 	})
 	defer done()
 
@@ -379,9 +415,14 @@ func TestBlockListenerSeedMonitoredHead_ReconcileAndDispatch(t *testing.T) {
 	bl.checkAndStartListenerLoop()
 
 	ev := <-updates
-	assert.Equal(t, []string{hashes[1000].String()}, ev.BlockHashes)
+	assert.Equal(t, []string{hashes[1001].String()}, ev.BlockHashes)
+	assert.True(t, ev.GapPotential)
 
 	bl.WaitClosed()
+	view := bl.SnapshotMonitoredHeadChain()
+	require.Len(t, view, 3)
+	assert.Equal(t, uint64(999), view[0].Number.Uint64())
+	assert.Equal(t, uint64(1001), view[2].Number.Uint64())
 	mRPC.AssertExpectations(t)
 }
 
@@ -444,6 +485,129 @@ func TestBlockListenerOKSequential(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, headBlockInfo.SupportsEIP1559())
 	require.Equal(t, int64(10000), headBlockInfo.GasLimit.Int64())
+}
+
+// Client filter polling mode: no block filter is ever created (the strict mock fails on any
+// eth_newBlockFilter / eth_getFilterChanges call). The head block is polled each iteration and
+// reconciled into the seeded canonical chain - a gap is filled by the chain rebuild, and a re-org
+// at the head is seen on the next poll.
+func TestBlockListenerClientModeOKSequential(t *testing.T) {
+	block999Hash := testBlockHashFor(999)
+	block1000Hash := testBlockHashFor(1000)
+	block1001Hash := testBlockHashFor(1001)
+	block1002Hash := testBlockHashFor(1002)
+	block1003Hash := testBlockHashFor(1003)
+	block1003ForkHash := testBlockHashFor(1003, 1)
+
+	startLatch := newTestLatch()
+	_, bl, mRPC, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc) {
+		conf.BlockPollingInterval = shortDelay
+		conf.MonitoredHeadLength = 2 // seed window is 1000-2+1 = 999
+		conf.FilterPollingMode = FilterPollingModeClient
+
+		mockInitialBlockHeight(mRPC, 1000)
+		mockSeedBlock(mRPC, 999, block999Hash, testBlockHashFor(998)).Once()
+		mockSeedBlock(mRPC, 1000, block1000Hash, block999Hash).Once()
+
+		// poll 1: one new block
+		mockLatestBlock(mRPC, 1001, block1001Hash, block1000Hash, startLatch)
+		// poll 2: two new blocks - the head does not fit on the tail (1001), so the chain is rebuilt:
+		// the tail is re-validated, then filled by number until the block after the head is not found
+		mockLatestBlock(mRPC, 1003, block1003Hash, block1002Hash, nil)
+		mockBlockByNumber(mRPC, 1001, &block1001Hash).Once()
+		mockBlockByNumber(mRPC, 1002, &block1002Hash).Once()
+		mockBlockByNumber(mRPC, 1003, &block1003Hash).Once()
+		mockBlockByNumber(mRPC, 1004, nil).Once()
+		// poll 3: unchanged head - no dispatch
+		mockLatestBlock(mRPC, 1003, block1003Hash, block1002Hash, nil)
+		// poll 4: the head is replaced at the same height
+		mockLatestBlock(mRPC, 1003, block1003ForkHash, block1002Hash, nil)
+		mockLatestBlockParked(mRPC, 1003, block1003ForkHash, block1002Hash)
+	})
+
+	updates := make(chan *ffcapi.BlockHashEvent)
+	consumerID := fftypes.NewUUID()
+	bl.AddConsumer(context.Background(), &BlockUpdateConsumer{
+		ID:      consumerID,
+		Ctx:     context.Background(),
+		Updates: updates,
+	})
+	startLatch.complete()
+
+	bu := <-updates
+	assert.Equal(t, []string{block1001Hash.String()}, bu.BlockHashes)
+	assert.True(t, bu.GapPotential)
+	bu = <-updates
+	assert.Equal(t, []string{block1002Hash.String(), block1003Hash.String()}, bu.BlockHashes)
+	assert.False(t, bu.GapPotential)
+	bu = <-updates
+	assert.Equal(t, []string{block1003ForkHash.String()}, bu.BlockHashes)
+	assert.False(t, bu.GapPotential)
+
+	bl.RemoveConsumer(context.Background(), consumerID)
+	done()
+	<-bl.listenLoopDone
+
+	assert.Equal(t, uint64(1003), bl.highestBlock)
+	mRPC.AssertExpectations(t)
+	chain := bl.SnapshotMonitoredHeadChain()
+	require.Len(t, chain, bl.MonitoredHeadLength)
+	assert.Equal(t, block1003ForkHash, chain[len(chain)-1].Hash)
+}
+
+// A failure polling the latest block is retried on the next iteration, and the startup gap hint is
+// held until a poll succeeds
+func TestBlockListenerClientModePollFailuresRetry(t *testing.T) {
+	block999Hash := testBlockHashFor(999)
+	block1000Hash := testBlockHashFor(1000)
+	block1001Hash := testBlockHashFor(1001)
+	block1002Hash := testBlockHashFor(1002)
+
+	startLatch := newTestLatch()
+	_, bl, mRPC, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, cancelCtx context.CancelFunc) {
+		conf.BlockPollingInterval = shortDelay
+		conf.MonitoredHeadLength = 2 // seed window is 1000-2+1 = 999
+		conf.FilterPollingMode = FilterPollingModeClient
+
+		mockInitialBlockHeight(mRPC, 1000)
+		mockSeedBlock(mRPC, 999, block999Hash, testBlockHashFor(998)).Once()
+		mockSeedBlock(mRPC, 1000, block1000Hash, block999Hash).Once()
+
+		// poll 1: latest fails
+		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByNumber", "latest", false).Return(&rpcbackend.RPCError{Message: "pop"}).Run(func(args mock.Arguments) {
+			startLatch.waitComplete()
+		}).Once()
+		// poll 2: latest returns nothing
+		mockLatestBlock(mRPC, 0, nil, nil, nil)
+		// poll 3: all good - the head does not fit on the tail (1000), so the chain rebuild fills 1001
+		mockLatestBlock(mRPC, 1002, block1002Hash, block1001Hash, nil)
+		mockBlockByNumber(mRPC, 1000, &block1000Hash).Once()
+		mockBlockByNumber(mRPC, 1001, &block1001Hash).Once()
+		mockBlockByNumber(mRPC, 1002, &block1002Hash).Once()
+		mockBlockByNumber(mRPC, 1003, nil).Once()
+		mockLatestBlockParked(mRPC, 1002, block1002Hash, block1001Hash)
+	})
+	registry := initTestMetrics(t, bl)
+
+	updates := make(chan *ffcapi.BlockHashEvent)
+	bl.AddConsumer(context.Background(), &BlockUpdateConsumer{
+		ID:      fftypes.NewUUID(),
+		Ctx:     context.Background(),
+		Updates: updates,
+	})
+	startLatch.complete()
+
+	bu := <-updates
+	assert.Equal(t, []string{block1001Hash.String(), block1002Hash.String()}, bu.BlockHashes)
+	assert.True(t, bu.GapPotential) // no poll had succeeded before this one
+
+	done()
+	<-bl.listenLoopDone
+	mRPC.AssertExpectations(t)
+	assert.Equal(t, float64(2), readPollFailureMetric(t, registry, "eth_getBlockByNumber"))
+	v, ok := readGaugeMetric(t, registry, metricTargetBlockHeight)
+	require.True(t, ok)
+	assert.Equal(t, float64(1002), v)
 }
 
 func TestBlockListenerWSShoulderTap(t *testing.T) {
@@ -1176,6 +1340,23 @@ func TestBlockListenerProcessNonStandardHashAcceptedWhenInHederaCompatbilityMode
 	mRPC.AssertExpectations(t)
 }
 
+func TestResolveBlockHashesStopsWhenConsumerBreaks(t *testing.T) {
+	block1001Hash := testBlockHashFor(1001)
+	_, bl, mRPC, done := newTestBlockListener(t, func(_ *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
+		mockBlockByHash(mRPC, 1001, block1001Hash, testBlockHashFor(1000)).Once()
+	})
+	defer done()
+
+	var resolved []*ethrpc.BlockInfoJSONRPC
+	for bi := range bl.resolveBlockHashes([]ethtypes.HexBytes0xPrefix{block1001Hash, testBlockHashFor(1002)}) {
+		resolved = append(resolved, bi)
+		break
+	}
+	require.Len(t, resolved, 1)
+	assert.Equal(t, block1001Hash, resolved[0].Hash)
+	mRPC.AssertExpectations(t)
+}
+
 func TestBlockListenerReestablishBlockFilter(t *testing.T) {
 
 	_, bl, mRPC, done := newTestBlockListener(t)
@@ -1233,9 +1414,10 @@ func TestBlockListenerWaitUntilStartedOnlyReturnsAfterEstablishingBlockFilter(t 
 	mRPC.AssertExpectations(t)
 }
 
-// TestBlockListenerHeadBlockNumber_DispatchesAndSkipsDuplicateHead exercises listenLoop head-only mode:
-// eth_blockNumber refresh updates currentChainHead and dispatches BlockHashEvent with HeadBlockNumber;
-// when the RPC head is unchanged, no event is sent.
+// TestBlockListenerHeadBlockNumber_DispatchesAndSkipsDuplicateHead exercises light chain tracking mode:
+// only eth_blockNumber is polled (no block filter is created, in either filter polling mode), a changed
+// head updates currentChainHead and dispatches a BlockHashEvent with HeadBlockNumber, and an unchanged
+// head sends nothing.
 func TestBlockListenerHeadBlockNumber_DispatchesAndSkipsDuplicateHead(t *testing.T) {
 	startLatch := newTestLatch()
 	var bnCall int
@@ -1250,6 +1432,7 @@ func TestBlockListenerHeadBlockNumber_DispatchesAndSkipsDuplicateHead(t *testing
 			case 1:
 				v = 1000 // establishBlockHeightWithRetry
 			case 2:
+				startLatch.waitComplete()
 				v = 1000 // first refresh: currentChainHead was 0 → dispatch
 			case 3:
 				v = 1000 // second refresh: same as currentChainHead → no dispatch
@@ -1259,17 +1442,6 @@ func TestBlockListenerHeadBlockNumber_DispatchesAndSkipsDuplicateHead(t *testing
 				v = 1001
 			}
 			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(v)
-		}).Maybe()
-
-		mockNewBlockFilter(mRPC, testBlockFilterID1).Once()
-
-		var getFilterCalls int
-		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getFilterChanges", testBlockFilterID1).Return(nil).Run(func(args mock.Arguments) {
-			getFilterCalls++
-			if getFilterCalls == 1 {
-				startLatch.waitComplete()
-			}
-			*args[1].(*[]ethtypes.HexBytes0xPrefix) = nil
 		}).Maybe()
 	})
 	defer done()
@@ -1308,8 +1480,6 @@ func TestBlockListenerLightModeRefreshChainHeadFailure(t *testing.T) {
 		conf.ChainTrackingMode = ffcapi.ChainTrackingModeLight
 
 		mockInitialBlockHeight(mRPC, 1000)
-		mockNewBlockFilter(mRPC, testBlockFilterID1).Once()
-		mockFilterChanges(mRPC, testBlockFilterID1, nil).Once()
 		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(&rpcbackend.RPCError{Message: "pop"}).Run(func(args mock.Arguments) {
 			cancelCtx()
 		}).Once()

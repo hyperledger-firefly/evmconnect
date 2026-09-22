@@ -19,6 +19,7 @@ package ethereum
 import (
 	"github.com/hyperledger-firefly/common/pkg/config"
 	"github.com/hyperledger-firefly/common/pkg/wsclient"
+	"github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
@@ -58,17 +59,17 @@ const (
 	UseGetBlockReceipts           = "useGetBlockReceipts"
 )
 
-// filterPollingMode determines how the steady state loop of an event stream polls for new events,
-// once it has caught up with the head of the chain.
-type filterPollingMode string
+// filterPollingMode determines how the block listener polls for new blocks, and how the steady state
+// loop of an event stream polls for new events once it has caught up with the head of the chain.
+type filterPollingMode = ethblocklistener.FilterPollingMode
 
 const (
-	// FilterPollingModeServer uses a node-side filter, established with eth_newFilter and polled
-	// with eth_getFilterChanges, so the node tracks which logs are new since the last poll
-	FilterPollingModeServer filterPollingMode = "server"
-	// FilterPollingModeClient uses stateless eth_getLogs range queries, with the connector tracking
-	// its own in-memory poll position - avoiding node-side filter state entirely
-	FilterPollingModeClient filterPollingMode = "client"
+	// FilterPollingModeServer uses node-side filters, established with eth_newBlockFilter / eth_newFilter
+	// and polled with eth_getFilterChanges, so the node tracks what is new since the last poll
+	FilterPollingModeServer = ethblocklistener.FilterPollingModeServer
+	// FilterPollingModeClient polls the latest block, and uses stateless eth_getLogs range queries, with
+	// the connector tracking its own in-memory poll positions - avoiding node-side filter state entirely
+	FilterPollingModeClient = ethblocklistener.FilterPollingModeClient
 )
 
 const (
