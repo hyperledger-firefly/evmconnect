@@ -176,6 +176,9 @@ func (c *ethConnector) TransactionReceipt(ctx context.Context, req *ffcapi.Trans
 		return nil, "", rpcErr.Error()
 	}
 	if ethReceipt == nil {
+		if reason, err := c.checkReceiptNodeBehind(ctx, req); err != nil {
+			return nil, reason, err
+		}
 		return nil, ffcapi.ErrorReasonNotFound, i18n.NewError(ctx, msgs.MsgReceiptNotAvailable, req.TransactionHash)
 	}
 
@@ -214,6 +217,27 @@ func (c *ethConnector) TransactionReceipt(ctx context.Context, req *ffcapi.Trans
 	}
 
 	return receiptResponse, "", nil
+}
+
+// checkReceiptNodeBehind decides, in light chain tracking mode, whether a null receipt is definitive.
+// The caller tells us the block it saw the transaction in (req.BlockNumber - the block of the event it
+// is confirming). The node that answered can be up to checkpointBlockGap behind the highest head we
+// have observed, and a node at the same height can be on a different fork with the transaction
+// not (yet) included - so null is only definitive once every node is expected to be checkpointBlockGap
+// past that block: observedHead-checkpointBlockGap >= blockNumber+checkpointBlockGap. Before that the
+// answer is ErrorReasonNodeBehind, and the caller retries as the head advances.
+// Full mode, and requests without a block number, are unchanged: null is not found.
+func (c *ethConnector) checkReceiptNodeBehind(ctx context.Context, req *ffcapi.TransactionReceiptRequest) (ffcapi.ErrorReason, error) {
+	if c.chainTrackingMode != ffcapi.ChainTrackingModeLight || req.BlockNumber == nil {
+		return "", nil
+	}
+	blockNumber := req.BlockNumber.Uint64()
+	observedHead, ok := c.blockListener.GetHighestBlock(ctx)
+	//nolint:gosec // checkpointBlockGap is validated non-negative
+	if ok && observedHead >= blockNumber+2*uint64(c.checkpointBlockGap) {
+		return "", nil
+	}
+	return ffcapi.ErrorReasonNodeBehind, i18n.NewError(ctx, msgs.MsgReceiptNodeBehind, req.TransactionHash, blockNumber, observedHead)
 }
 
 // enrichTransactionReceipt tries to get the error information

@@ -305,13 +305,15 @@ func (es *eventStream) leadGroupCatchup() bool {
 		}
 
 		// Poll in the range for events
-		toBlock := fromBlock + es.c.catchupPageSize - 1
+		toBlock := fromBlock + es.c.getCatchupPageSize() - 1
 		if toBlock > pollableHead {
 			toBlock = pollableHead
 		}
 		events, err := es.getBlockRangeEvents(es.ctx, ag, fromBlock, toBlock)
 		if err != nil {
-			log.L(es.ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d headBlock=%d: %s", fromBlock, toBlock, chainHeadBlock, err)
+			// Catchup never polls above the stable threshold, so in light mode any failure is a
+			// drift violation (or an outage) - never an expected range-ahead rejection
+			_ = es.rangeQueryFailed(es.ctx, fromBlock, toBlock, blockNumberToInt64(chainHeadBlock), false, err)
 			failCount++
 			continue
 		}

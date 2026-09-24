@@ -30,7 +30,6 @@ import (
 // State required when doing all management of polling position client-side
 type getLogsPollState struct {
 	fromBlock       int64                      // full mode: the next block to poll. light mode: the committed base of the re-scan window
-	scanBlock       int64                      // light mode only: sweep cursor when paging a window wider than one page (-1 = start the next sweep at fromBlock)
 	polledChain     []*ethrpc.BlockInfoJSONRPC // full mode only: sparse ascending (number, hash) records of polled blocks in the unstable window
 	deliveredBlocks map[string]int64           // light mode only: blockHash->number for block-versions whose logs we have already delivered
 }
@@ -39,7 +38,6 @@ type getLogsPollState struct {
 // delivered-block records (redelivery of the unstable window is de-duplicated downstream)
 func (ps *getLogsPollState) reset(fromBlock int64) {
 	ps.fromBlock = fromBlock
-	ps.scanBlock = -1
 	ps.polledChain = nil
 	ps.deliveredBlocks = nil
 }
@@ -64,10 +62,16 @@ func (ps *getLogsPollState) filterDelivered(logs []*ethrpc.LogJSONRPC) []*ethrpc
 
 // advanceRescan moves the light mode poll state forwards after successfully dispatching a page:
 // the newly delivered block-versions are recorded for de-duplication on later sweeps, the
-// committed window base moves to newBase (capped at the stable threshold), records for blocks
-// that have become stable are dropped (they are never re-scanned), and the sweep cursor either
-// pages onwards or resets ready to re-scan the whole window on the next cycle.
-func (ps *getLogsPollState) advanceRescan(newLogs []*ethrpc.LogJSONRPC, newBase, toBlock, chainHead int64) {
+// committed window base moves to newBase (the page end, capped at the stable threshold), and
+// records for blocks that have become stable are dropped (they are never re-scanned).
+//
+// Every page starts at the committed base, so a page that reaches the stable threshold is the
+// last page of a sweep - the base holds at the threshold and the next cycle re-scans the whole
+// unstable window [stableHead, head] from there. The catchup page size is at least
+// checkpointBlockGap+1, so that window is always covered by a single page: a node that (against
+// the requirement stated on ffcapi.ChainTrackingModeLight) silently truncated a page at its own
+// head can only have lost events the next sweep re-scans, never events below a committed position.
+func (ps *getLogsPollState) advanceRescan(newLogs []*ethrpc.LogJSONRPC, newBase int64) {
 	for _, l := range newLogs {
 		if ps.deliveredBlocks == nil {
 			ps.deliveredBlocks = map[string]int64{}
@@ -79,11 +83,6 @@ func (ps *getLogsPollState) advanceRescan(newLogs []*ethrpc.LogJSONRPC, newBase,
 		if n < newBase {
 			delete(ps.deliveredBlocks, h)
 		}
-	}
-	if toBlock >= chainHead {
-		ps.scanBlock = -1 // sweep complete - re-scan the whole window from fromBlock next cycle
-	} else {
-		ps.scanBlock = toBlock + 1 // page onwards through this sweep without waiting
 	}
 }
 
@@ -219,7 +218,7 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 	var ag *aggregatedListener
 	lastUpdate := -1
 	failCount := 0
-	poll := &getLogsPollState{fromBlock: -1, scanBlock: -1}
+	poll := &getLogsPollState{fromBlock: -1}
 	for {
 		if es.c.retry.DoFailureDelay(es.ctx, failCount) {
 			log.L(es.ctx).Debugf("Stream loop exiting")
@@ -234,8 +233,9 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 		// No need to poll for events, if we don't have any listeners
 		if len(ag.signatureSet) > 0 {
 
-			// The block listener maintains a view of the highest block (in light mode this
-			// can go down as well as up). This call is just grabbing the current in-memory value.
+			// The block listener maintains a view of the highest block. In light mode this is the
+			// highest head observed across the (possibly load-balanced) nodes, and only goes down
+			// for a chain reset. This call is just grabbing the current in-memory value.
 			chainHeadBlock, ok := es.c.blockListener.GetHighestBlock(es.ctx)
 			if !ok {
 				log.L(es.ctx).Debugf("Stream loop exiting (closed checking block height)")
@@ -277,32 +277,35 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 			// In light chain tracking mode there is no canonical chain view to check against, so
 			// instead we re-scan the whole unstable window on every sweep, de-duplicating what we
 			// already delivered by block hash - the committed position (poll.fromBlock) only ever
-			// advances to the stable threshold, and the sweep cursor pages beyond it to the head
+			// advances to the stable threshold, and each sweep scans from there to the head
 			lightMode := es.c.chainTrackingMode == ffcapi.ChainTrackingModeLight
 			var headChain []*ethrpc.BlockInfoJSONRPC
-			scanFrom := poll.fromBlock
-			if lightMode {
-				if poll.scanBlock > poll.fromBlock {
-					scanFrom = poll.scanBlock // mid-sweep - continue paging from the cursor
-				}
-			} else {
+			if !lightMode {
 				headChain = es.c.blockListener.SnapshotMonitoredHeadChain()
-				poll.checkReorgRewind(es.ctx, headChain)
-				scanFrom = poll.fromBlock // may have been rewound
+				poll.checkReorgRewind(es.ctx, headChain) // may rewind poll.fromBlock
 			}
+			scanFrom := poll.fromBlock
 
 			// Poll the next page of blocks, if there are any we haven't polled yet.
 			// Note if the scan ceiling holds us below the head, caughtUpToHead stays true:
 			// we wait a poll interval for the view to extend, we don't spin.
 			toBlock := steadyStateScanCeiling(lightMode, chainHead, stableHead, headChain)
-			if maxToBlock := scanFrom + es.c.catchupPageSize - 1; toBlock > maxToBlock {
+			if maxToBlock := scanFrom + es.c.getCatchupPageSize() - 1; toBlock > maxToBlock {
 				toBlock = maxToBlock
 				caughtUpToHead = false // page again immediately, rather than waiting the polling interval
 			}
 			if toBlock >= scanFrom {
 				ethLogs, err := es.getBlockRangeLogs(es.ctx, ag, scanFrom, toBlock)
 				if err != nil {
-					log.L(es.ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d headBlock=%d: %s", scanFrom, toBlock, chainHead, err)
+					if es.rangeQueryFailed(es.ctx, scanFrom, toBlock, chainHead, toBlock > stableHead, err) {
+						// An expected rejection of a page in the unstable window, from a node behind the
+						// head we observed. Retry after the polling interval, with no failure backoff -
+						// but never spin (a capped page cleared caughtUpToHead above)
+						if es.waitPollingInterval() {
+							return true
+						}
+						continue
+					}
 					failCount++
 					continue
 				}
@@ -321,8 +324,8 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 				// the scan runs to the head, but blocks in the unstable window can still change and the
 				// re-org repair state (recorded hashes / delivered blocks) is in-memory only, so the
 				// checkpoint holds at the horizon and a restart re-scans the window (redelivery is
-				// de-duplicated downstream). Light mode heads can also move backwards when the chain
-				// shortens, so there we additionally never move the committed base backwards.
+				// de-duplicated downstream). A light mode head can still move backwards for a chain
+				// reset, so there we additionally never move the committed base backwards.
 				hwmBlock := toBlock + 1
 				if stableHead < hwmBlock {
 					hwmBlock = stableHead
@@ -343,18 +346,13 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 				es.storeHeadBlockForward(hwmBlock)
 
 				if lightMode {
-					// Record the block-versions we just delivered, advance the committed window
-					// base, and page or reset the sweep cursor
-					poll.advanceRescan(ethLogs, hwmBlock, toBlock, chainHead)
+					// Record the block-versions we just delivered, and advance the committed window base
+					poll.advanceRescan(ethLogs, hwmBlock)
 				} else {
 					// Advance our poll position, recording the hashes of the blocks we polled so we
 					// can detect a re-org behind us on a later cycle
 					poll.advance(headChain, toBlock)
 				}
-			} else if lightMode {
-				// Nothing scannable (the head is at/below our committed base) - restart the sweep
-				// from the base when the chain grows again
-				poll.scanBlock = -1
 			}
 		}
 
@@ -362,13 +360,44 @@ func (es *eventStream) leadGroupSteadyStateGetLogs() bool {
 		failCount = 0
 
 		// Sleep for the polling interval, unless we are paging through a backlog
-		if caughtUpToHead {
-			select {
-			case <-time.After(es.c.eventFilterPollingInterval):
-			case <-es.ctx.Done():
-				log.L(es.ctx).Debugf("Stream loop stopping")
-				return true
-			}
+		if caughtUpToHead && es.waitPollingInterval() {
+			return true
 		}
 	}
+}
+
+// waitPollingInterval sleeps for the event polling interval, returning true if the stream stopped
+func (es *eventStream) waitPollingInterval() bool {
+	select {
+	case <-time.After(es.c.eventFilterPollingInterval):
+		return false
+	case <-es.ctx.Done():
+		log.L(es.ctx).Debugf("Stream loop stopping")
+		return true
+	}
+}
+
+// rangeQueryFailed handles a failed eth_getLogs range query from any of the polling loops. It returns
+// true when the failure is an expected light chain tracking mode rejection that the caller should
+// simply retry after the polling interval, and false when the caller should apply its failure backoff.
+//
+// In light mode a successful response is complete for the whole range, because the node rejects a
+// range beyond its own head (the requirement stated on ffcapi.ChainTrackingModeLight). A rejected
+// page above the stable threshold (checkpointBlockGap behind the highest head we have observed) is
+// expected: a load-balanced node behind that head. A failure of a page at/below the threshold means
+// a node is more than checkpointBlockGap behind - outside the drift the mode tolerates, and a
+// deployment problem to surface - or the node is failing outright.
+func (es *eventStream) rangeQueryFailed(ctx context.Context, fromBlock, toBlock, chainHead int64, aboveStableHead bool, err error) bool {
+	if es.c.chainTrackingMode != ffcapi.ChainTrackingModeLight {
+		log.L(ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d headBlock=%d: %s", fromBlock, toBlock, chainHead, err)
+		return false
+	}
+	if aboveStableHead {
+		log.L(ctx).Infof("Query of block range in the unstable window rejected (a node behind the observed head) - retrying after the polling interval fromBlock=%d toBlock=%d headBlock=%d: %s", fromBlock, toBlock, chainHead, err)
+		es.c.blockListener.IncLightModeRangeAhead()
+		return true
+	}
+	log.L(ctx).Warnf("Query of stable block range failed - a node is more than checkpointBlockGap=%d behind the observed head, or failing fromBlock=%d toBlock=%d headBlock=%d: %s", es.c.checkpointBlockGap, fromBlock, toBlock, chainHead, err)
+	es.c.blockListener.IncLightModeDriftViolation()
+	return false
 }

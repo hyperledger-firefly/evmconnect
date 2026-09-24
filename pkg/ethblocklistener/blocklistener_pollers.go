@@ -57,7 +57,8 @@ func (bl *blockListener) newBlockPoller() blockPoller {
 // headNumberPoller is light chain tracking mode, in either filter polling mode. There is no canonical
 // chain being built, so the head we dispatch to consumers is what we report as the canonical height -
 // both through GetHeadBlockNumber (used by FFTM's head-number confirmation checks) and GetHighestBlock
-// (used by event streams).
+// (used by event streams). The head is the highest reading observed, so it is forward-only across
+// load-balanced nodes at different heights (see acceptHeadBlockNumber).
 type headNumberPoller struct {
 	bl *blockListener
 }
@@ -69,11 +70,9 @@ func (p *headNumberPoller) poll() error {
 		log.L(bl.ctx).Errorf("Failed to refresh chain head: %s", err)
 		return err
 	}
-	if head == bl.currentChainHead {
+	if !bl.acceptHeadBlockNumber(head) {
 		return nil
 	}
-	bl.currentChainHead = head
-	bl.setHighestBlock(head)
 	update := &ffcapi.BlockHashEvent{GapPotential: false, Created: fftypes.Now(), HeadBlockNumber: head}
 	bl.dispatchToConsumers(bl.snapshotConsumers(), update)
 	return nil

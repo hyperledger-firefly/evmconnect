@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/hyperledger-firefly/common/pkg/config"
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/evmconnect/mocks/ethblocklistenermocks"
 	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/stretchr/testify/assert"
@@ -268,6 +270,62 @@ func TestGetReceiptNotFound(t *testing.T) {
 	assert.Equal(t, ffcapi.ErrorReasonNotFound, reason)
 	assert.Nil(t, res)
 
+}
+
+func TestGetReceiptNotFoundLightMode(t *testing.T) {
+
+	ctx, c, mRPC, done := newLightModeTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsCheckpointBlockGap, 50)
+	})
+	defer done()
+	mbl := ethblocklistenermocks.NewBlockListener(t)
+	mbl.On("WaitClosed").Return().Maybe()
+	c.blockListener = mbl
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", mock.Anything).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			err := json.Unmarshal([]byte("null"), args[1])
+			assert.NoError(t, err)
+		})
+
+	var req ffcapi.TransactionReceiptRequest
+	err := json.Unmarshal([]byte(sampleGetReceipt), &req)
+	assert.NoError(t, err)
+
+	// Without a block number from the caller, null is not found (as in full mode)
+	res, reason, err := c.TransactionReceipt(ctx, &req)
+	assert.Regexp(t, "FF23012", err)
+	assert.Equal(t, ffcapi.ErrorReasonNotFound, reason)
+	assert.Nil(t, res)
+
+	// The caller saw the transaction in block 1000. The answering node can be up to
+	// checkpointBlockGap (50) behind the observed head, and at the same height on another fork,
+	// so null is only definitive once the observed head is 2*checkpointBlockGap past the block
+	req.BlockNumber = fftypes.NewFFBigInt(1000)
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1099), true).Once()
+	res, reason, err = c.TransactionReceipt(ctx, &req)
+	assert.Regexp(t, "FF23083.*1,000.*1,099", err)
+	assert.Equal(t, ffcapi.ErrorReasonNodeBehind, reason)
+	assert.Nil(t, res)
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1100), true).Once()
+	res, reason, err = c.TransactionReceipt(ctx, &req)
+	assert.Regexp(t, "FF23012", err)
+	assert.Equal(t, ffcapi.ErrorReasonNotFound, reason)
+	assert.Nil(t, res)
+
+	// The block listener closing is transient too
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(0), false).Once()
+	_, reason, err = c.TransactionReceipt(ctx, &req)
+	assert.Regexp(t, "FF23083", err)
+	assert.Equal(t, ffcapi.ErrorReasonNodeBehind, reason)
+
+	// Full mode ignores the block number
+	c.chainTrackingMode = ffcapi.ChainTrackingModeFull
+	_, reason, err = c.TransactionReceipt(ctx, &req)
+	assert.Regexp(t, "FF23012", err)
+	assert.Equal(t, ffcapi.ErrorReasonNotFound, reason)
 }
 
 func TestGetReceiptError(t *testing.T) {

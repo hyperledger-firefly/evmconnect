@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
@@ -153,6 +154,20 @@ func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc e
 		c.catchupThreshold = c.catchupPageSize
 	}
 
+	if c.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+		// The contract light mode relies on is documented on ffcapi.ChainTrackingModeLight
+		if c.catchupPageSize < c.checkpointBlockGap+1 {
+			return nil, i18n.NewError(ctx, msgs.MsgLightModeCatchupPageSizeInvalid, c.catchupPageSize, c.checkpointBlockGap+1)
+		}
+		if c.eventFilterPollingMode != FilterPollingModeClient {
+			return nil, i18n.NewError(ctx, msgs.MsgLightModeFilterPollingModeInvalid, c.eventFilterPollingMode)
+		}
+		if c.eventBlockTimestamps {
+			log.L(ctx).Warnf("Light chain tracking mode with %s=true fetches each block by hash to obtain its timestamp - a fail-safe extra JSON/RPC call per block with events, that can be avoided by setting it false", EventsBlockTimestamps)
+		}
+		c.verifyLightModeRangeErrors(ctx)
+	}
+
 	c.txCache, err = lru.New(conf.GetInt(TxCacheSize))
 	if err != nil {
 		return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "transaction")
@@ -200,6 +215,74 @@ func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc e
 	}
 
 	return c, nil
+}
+
+const (
+	lightModeRangeProbeOffset   = 1_000_000 // how far above the head the probe eth_getLogs range is placed
+	lightModeRangeProbeAttempts = 5         // attempts to query the head before the probe gives up
+)
+
+// verifyLightModeRangeErrors probes the node once at startup, before anything else is polled, to
+// check it rejects an eth_getLogs query for a block range above its head rather than returning an
+// empty result. Light chain tracking mode relies on every successful eth_getLogs response being
+// complete for the requested range to guarantee no events are missed when requests are load balanced
+// across nodes at different heights (see ffcapi.ChainTrackingModeLight). The probe is advisory: a
+// node that fails it, or cannot be reached, is warned about and the connector starts regardless.
+func (c *ethConnector) verifyLightModeRangeErrors(ctx context.Context) {
+	var hexHead ethtypes.HexInteger
+	err := c.retry.Do(ctx, "light mode range probe", func(attempt int) (bool, error) {
+		rpcErr := c.rpc.CallRPC(ctx, &hexHead, "eth_blockNumber")
+		if rpcErr != nil {
+			return attempt < lightModeRangeProbeAttempts, rpcErr.Error()
+		}
+		return false, nil
+	})
+	if err != nil {
+		log.L(ctx).Warnf("Unable to verify the node rejects eth_getLogs ranges above its head (see ffcapi.ChainTrackingModeLight) - failed to query the chain head: %s", err)
+		return
+	}
+	fromBlock := hexHead.BigInt().Uint64() + lightModeRangeProbeOffset
+	var logs []*ethrpc.LogJSONRPC
+	rpcErr := c.rpc.CallRPC(ctx, &logs, "eth_getLogs", &ethrpc.LogFilterJSONRPC{
+		FromBlock: ethtypes.NewHexIntegerU64(fromBlock),
+		ToBlock:   ethtypes.NewHexIntegerU64(fromBlock + 1),
+	})
+	if rpcErr == nil {
+		log.L(ctx).Warnf("The node returned a successful response for an eth_getLogs query above its head (head=%d probe fromBlock=%d). Light chain tracking mode requires nodes to reject eth_getLogs ranges outside the blocks they know (geth, Nethermind, Besu 26.1.0+, reth 1.10.0+ and Erigon 3.3.3+ do), otherwise events can be missed when load balanced nodes are at different heights", hexHead.BigInt().Uint64(), fromBlock)
+		return
+	}
+	log.L(ctx).Infof("Verified the node rejects eth_getLogs ranges above its head (head=%d probe fromBlock=%d): %s", hexHead.BigInt().Uint64(), fromBlock, rpcErr.Message)
+}
+
+// getCatchupPageSize reads the catchup page size, which is shared by every polling loop and can be
+// reduced at runtime by downscaleCatchupPageSize
+func (c *ethConnector) getCatchupPageSize() int64 {
+	return atomic.LoadInt64(&c.catchupPageSize)
+}
+
+// downscaleCatchupPageSize halves the catchup page size after an eth_getLogs error matching the
+// configured downscale regex (a node limiting its response size). In light chain tracking mode the
+// page size is floored at checkpointBlockGap+1, so a single page always covers the unstable window
+// at the head of the chain (see ffcapi.ChainTrackingModeLight).
+func (c *ethConnector) downscaleCatchupPageSize(ctx context.Context) {
+	current := c.getCatchupPageSize()
+	if current <= 1 {
+		return
+	}
+	newSize := current / 2
+	if c.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+		if floor := c.checkpointBlockGap + 1; newSize < floor {
+			if current <= floor {
+				log.L(ctx).Warnf("Catchup page size cannot be reduced below checkpointBlockGap+1 (%d) in light chain tracking mode - the node is rejecting a page of that size", floor)
+				return
+			}
+			newSize = floor
+		}
+	}
+	atomic.StoreInt64(&c.catchupPageSize, newSize)
+	if newSize < 20 {
+		log.L(ctx).Warnf("Catchup page size auto-reduced to extremely low value %d. The connector may never catch up with the head of the chain.", newSize)
+	}
 }
 
 func (c *ethConnector) RPC() ethrpc.Client {

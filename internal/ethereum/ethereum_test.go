@@ -31,6 +31,7 @@ import (
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethblocklistener"
 	"github.com/hyperledger-firefly/evmconnect/pkg/ethrpc"
 	"github.com/hyperledger-firefly/signer/pkg/abi"
+	"github.com/hyperledger-firefly/signer/pkg/ethtypes"
 	"github.com/hyperledger-firefly/signer/pkg/rpcbackend"
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/sirupsen/logrus"
@@ -59,7 +60,10 @@ func newTestConnector(t *testing.T, confSetup ...func(conf config.Section)) (con
 }
 
 func newTestConnectorWithNoBlockerFilterDefaultMocks(t *testing.T, confSetup ...func(conf config.Section)) (context.Context, *ethConnector, *rpcbackendmocks.Backend, func()) {
-	mRPC := &rpcbackendmocks.Backend{}
+	return newTestConnectorWithMockRPC(t, &rpcbackendmocks.Backend{}, confSetup...)
+}
+
+func newTestConnectorWithMockRPC(t *testing.T, mRPC *rpcbackendmocks.Backend, confSetup ...func(conf config.Section)) (context.Context, *ethConnector, *rpcbackendmocks.Backend, func()) {
 	config.RootConfigReset()
 	conf := config.RootSection("unittest")
 	InitConfig(conf)
@@ -82,6 +86,118 @@ func newTestConnectorWithNoBlockerFilterDefaultMocks(t *testing.T, confSetup ...
 		done()
 		mRPC.AssertExpectations(t)
 		c.WaitClosed()
+	}
+}
+
+// lightModeTestConf returns a config setup for light chain tracking mode
+func lightModeTestConf(conf config.Section) {
+	conf.Set(ChainTrackingMode, ffcapi.ChainTrackingModeLight)
+	conf.Set(EventsFilterPollingMode, string(FilterPollingModeClient))
+}
+
+// mockLightModeRangeProbe sets the expectations for the startup probe that runs when a light mode
+// connector is constructed: a head of 1000, and the node rejecting the range above it
+func mockLightModeRangeProbe(mRPC *rpcbackendmocks.Backend) {
+	mockLightModeProbeHead(mRPC, 1000)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", lightModeProbeRange).Return(&rpcbackend.RPCError{Message: "toBlock is greater than latest block"}).Once()
+}
+
+func mockLightModeProbeHead(mRPC *rpcbackendmocks.Backend, head uint64) {
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(head)
+	}).Once()
+}
+
+var lightModeProbeRange = mock.MatchedBy(func(f *ethrpc.LogFilterJSONRPC) bool {
+	return f.FromBlock.BigInt().Uint64() == 1000+lightModeRangeProbeOffset && f.ToBlock.BigInt().Uint64() == 1001+lightModeRangeProbeOffset
+})
+
+func newLightModeTestConnector(t *testing.T, confSetup ...func(conf config.Section)) (context.Context, *ethConnector, *rpcbackendmocks.Backend, func()) {
+	mRPC := &rpcbackendmocks.Backend{}
+	mockLightModeRangeProbe(mRPC)
+	return newTestConnectorWithMockRPC(t, mRPC, append([]func(conf config.Section){lightModeTestConf}, confSetup...)...)
+}
+
+func TestConnectorInitLightModeValidation(t *testing.T) {
+
+	newConnector := func(mRPC *rpcbackendmocks.Backend, confSetup func(conf config.Section)) error {
+		config.RootConfigReset()
+		conf := config.RootSection("unittest")
+		InitConfig(conf)
+		conf.Set(ffresty.HTTPConfigURL, "http://localhost:8545")
+		lightModeTestConf(conf)
+		confSetup(conf)
+		_, err := NewEthereumConnectorWithRPC(context.Background(), conf, utRPC(t, mRPC))
+		mRPC.AssertExpectations(t)
+		return err
+	}
+
+	// The catchup page size must cover the unstable window (checkpointBlockGap+1) in a single page
+	err := newConnector(&rpcbackendmocks.Backend{}, func(conf config.Section) {
+		conf.Set(EventsCheckpointBlockGap, 50)
+		conf.Set(EventsCatchupPageSize, 50)
+	})
+	assert.Regexp(t, "FF23081.*50.*51", err)
+
+	// Node-side filters are bound to a single node, so only client filter polling is allowed
+	err = newConnector(&rpcbackendmocks.Backend{}, func(conf config.Section) {
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeServer))
+	})
+	assert.Regexp(t, "FF23082.*server", err)
+
+	// Defaults (page size 500, gap 50, block timestamps on - a warning only) are valid, and the
+	// range probe runs as part of construction
+	mRPC := &rpcbackendmocks.Backend{}
+	mockLightModeRangeProbe(mRPC)
+	err = newConnector(mRPC, func(conf config.Section) {})
+	assert.NoError(t, err)
+}
+
+func TestConnectorInitLightModeRangeProbeWarnings(t *testing.T) {
+
+	// The probe is advisory - neither outcome below stops the connector starting (the connectors
+	// here were constructed against a node that passed the probe, then re-probed directly)
+	fastRetry := func(conf config.Section) {
+		conf.Set(RetryInitDelay, "1us")
+	}
+
+	// The node silently returns an empty result for a range above its head - warned about
+	_, c, mRPC, done := newLightModeTestConnector(t, fastRetry, func(conf config.Section) {
+		conf.Set(EventsBlockTimestamps, false)
+	})
+	mockLightModeProbeHead(mRPC, 1000)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", lightModeProbeRange).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{}
+	}).Once()
+	c.verifyLightModeRangeErrors(context.Background())
+	done()
+
+	// The head cannot be queried - retried a bounded number of times, then warned about
+	_, c, mRPC, done = newLightModeTestConnector(t, fastRetry)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(&rpcbackend.RPCError{Message: "pop"}).Times(lightModeRangeProbeAttempts)
+	c.verifyLightModeRangeErrors(context.Background())
+	done()
+}
+
+func TestConnectorDownscaleCatchupPageSize(t *testing.T) {
+
+	_, c, _, done := newLightModeTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsCheckpointBlockGap, 50)
+		conf.Set(EventsCatchupPageSize, 500)
+	})
+	defer done()
+
+	// In light mode the page size halves down to, and never below, checkpointBlockGap+1
+	for _, expected := range []int64{250, 125, 62, 51, 51} {
+		c.downscaleCatchupPageSize(context.Background())
+		assert.Equal(t, expected, c.getCatchupPageSize())
+	}
+
+	// In full mode it halves all the way down to 1, and stops there
+	c.chainTrackingMode = ffcapi.ChainTrackingModeFull
+	for _, expected := range []int64{25, 12, 6, 3, 1, 1} {
+		c.downscaleCatchupPageSize(context.Background())
+		assert.Equal(t, expected, c.getCatchupPageSize())
 	}
 }
 
