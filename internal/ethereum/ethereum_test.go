@@ -157,12 +157,9 @@ func TestConnectorInitLightModeRangeProbeWarnings(t *testing.T) {
 
 	// The probe is advisory - neither outcome below stops the connector starting (the connectors
 	// here were constructed against a node that passed the probe, then re-probed directly)
-	fastRetry := func(conf config.Section) {
-		conf.Set(RetryInitDelay, "1us")
-	}
 
 	// The node silently returns an empty result for a range above its head - warned about
-	_, c, mRPC, done := newLightModeTestConnector(t, fastRetry, func(conf config.Section) {
+	_, c, mRPC, done := newLightModeTestConnector(t, func(conf config.Section) {
 		conf.Set(EventsBlockTimestamps, false)
 	})
 	mockLightModeProbeHead(mRPC, 1000)
@@ -172,9 +169,9 @@ func TestConnectorInitLightModeRangeProbeWarnings(t *testing.T) {
 	c.verifyLightModeRangeErrors(context.Background())
 	done()
 
-	// The head cannot be queried - retried a bounded number of times, then warned about
-	_, c, mRPC, done = newLightModeTestConnector(t, fastRetry)
-	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(&rpcbackend.RPCError{Message: "pop"}).Times(lightModeRangeProbeAttempts)
+	// The head cannot be queried - warned about, no retry
+	_, c, mRPC, done = newLightModeTestConnector(t)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(&rpcbackend.RPCError{Message: "pop"}).Once()
 	c.verifyLightModeRangeErrors(context.Background())
 	done()
 }

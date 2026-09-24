@@ -218,8 +218,7 @@ func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc e
 }
 
 const (
-	lightModeRangeProbeOffset   = 1_000_000 // how far above the head the probe eth_getLogs range is placed
-	lightModeRangeProbeAttempts = 5         // attempts to query the head before the probe gives up
+	lightModeRangeProbeOffset = 1_000_000 // how far above the head the probe eth_getLogs range is placed
 )
 
 // verifyLightModeRangeErrors probes the node once at startup, before anything else is polled, to
@@ -227,18 +226,11 @@ const (
 // empty result. Light chain tracking mode relies on every successful eth_getLogs response being
 // complete for the requested range to guarantee no events are missed when requests are load balanced
 // across nodes at different heights (see ffcapi.ChainTrackingModeLight). The probe is advisory: a
-// node that fails it, or cannot be reached, is warned about and the connector starts regardless.
+// node that fails it, or cannot be reached, is warned about (no retries) and the connector starts regardless.
 func (c *ethConnector) verifyLightModeRangeErrors(ctx context.Context) {
 	var hexHead ethtypes.HexInteger
-	err := c.retry.Do(ctx, "light mode range probe", func(attempt int) (bool, error) {
-		rpcErr := c.rpc.CallRPC(ctx, &hexHead, "eth_blockNumber")
-		if rpcErr != nil {
-			return attempt < lightModeRangeProbeAttempts, rpcErr.Error()
-		}
-		return false, nil
-	})
-	if err != nil {
-		log.L(ctx).Warnf("Unable to verify the node rejects eth_getLogs ranges above its head (see ffcapi.ChainTrackingModeLight) - failed to query the chain head: %s", err)
+	if rpcErr := c.rpc.CallRPC(ctx, &hexHead, "eth_blockNumber"); rpcErr != nil {
+		log.L(ctx).Warnf("Unable to verify the node rejects eth_getLogs ranges above its head (see ffcapi.ChainTrackingModeLight) - failed to query the chain head: %s", rpcErr.Message)
 		return
 	}
 	fromBlock := hexHead.BigInt().Uint64() + lightModeRangeProbeOffset
