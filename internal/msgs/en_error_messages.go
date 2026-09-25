@@ -101,4 +101,5 @@ var (
 	MsgLightModeCatchupPageSizeInvalid          = ffe("FF23081", "In light chain tracking mode the catchup page size (%d) must be at least checkpointBlockGap+1 (%d), so a single page covers the unstable window at the head of the chain")
 	MsgLightModeFilterPollingModeInvalid        = ffe("FF23082", "In light chain tracking mode the events filter polling mode must be 'client' (node-side filters are bound to a single node) value=%s")
 	MsgReceiptNodeBehind                        = ffe("FF23083", "Receipt not available for transaction '%s' expected in block %d: the node that answered may be behind the observed chain head %d")
+	MsgReceiptBlockMismatchNodeBehind           = ffe("FF23084", "Receipt for transaction '%s' is in block %d / %s, not the expected block %d / %s: the node that answered may be on a different fork, or behind the observed chain head %d")
 )

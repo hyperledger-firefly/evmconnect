@@ -328,6 +328,59 @@ func TestGetReceiptNotFoundLightMode(t *testing.T) {
 	assert.Equal(t, ffcapi.ErrorReasonNotFound, reason)
 }
 
+func TestGetReceiptBlockMismatchLightMode(t *testing.T) {
+
+	ctx, c, mRPC, done := newLightModeTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsCheckpointBlockGap, 50)
+	})
+	defer done()
+	mbl := ethblocklistenermocks.NewBlockListener(t)
+	mbl.On("WaitClosed").Return().Maybe()
+	c.blockListener = mbl
+
+	// The node answers with the receipt in block 1977 / 0x6197...
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getTransactionReceipt", mock.Anything).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			err := json.Unmarshal([]byte(sampleJSONRPCReceipt), args[1])
+			assert.NoError(t, err)
+		})
+
+	var req ffcapi.TransactionReceiptRequest
+	err := json.Unmarshal([]byte(sampleGetReceipt), &req)
+	assert.NoError(t, err)
+
+	// The caller saw the transaction in the same block, so the receipt is returned (hash compared case-insensitively)
+	req.BlockNumber = fftypes.NewFFBigInt(1977)
+	req.BlockHash = "0x6197EF1A58A2A592BB447EFB651F0DB7945DE21AA8048801B250BD7B7431F9B6"
+	res, reason, err := c.TransactionReceipt(ctx, &req)
+	assert.NoError(t, err)
+	assert.Empty(t, reason)
+	assert.Equal(t, int64(1977), res.BlockNumber.Int64())
+
+	// The caller saw it in another block. The answering node might be on a losing fork, so the
+	// mismatch is only reported once the observed head is 2*checkpointBlockGap past the block
+	req.BlockHash = "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(2076), true).Once()
+	res, reason, err = c.TransactionReceipt(ctx, &req)
+	assert.Regexp(t, "FF23084.*1,977.*0x6197.*0x3c3c.*2,076", err)
+	assert.Equal(t, ffcapi.ErrorReasonNodeBehind, reason)
+	assert.Nil(t, res)
+
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(2077), true).Once()
+	res, reason, err = c.TransactionReceipt(ctx, &req)
+	assert.NoError(t, err)
+	assert.Empty(t, reason)
+	assert.Equal(t, "0x6197ef1a58a2a592bb447efb651f0db7945de21aa8048801b250bd7b7431f9b6", res.BlockHash)
+
+	// Full mode ignores the block hash
+	c.chainTrackingMode = ffcapi.ChainTrackingModeFull
+	res, reason, err = c.TransactionReceipt(ctx, &req)
+	assert.NoError(t, err)
+	assert.Empty(t, reason)
+	assert.NotNil(t, res)
+}
+
 func TestGetReceiptError(t *testing.T) {
 
 	ctx, c, mRPC, done := newTestConnector(t)
