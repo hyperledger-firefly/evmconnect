@@ -580,6 +580,7 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 // markDetectedAndDispatch records the detection point then (importantly afterwards) pushes the event to FFTM
 func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ffcapi.ListenerEvent) (exiting bool) {
 	log.L(es.ctx).Debugf("Detected event %s", event.Event)
+	event.DetectedStable = es.detectedStable(event)
 
 	// ListenerID is set in filterEnrichEthLog and must be non-nil
 	ag.listenersByID[*event.Event.ID.ListenerID].markDetected(event.Checkpoint.(*listenerCheckpoint))
@@ -590,6 +591,18 @@ func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ff
 		return true
 	}
 
+}
+
+// detectedStable reports, in light chain tracking mode, whether the event's block is already behind the stable
+// head (checkpointBlockGap behind the highest head observed), so no re-org can remove it. FFTM confirms such an
+// event by head count without validating its receipt (see ffcapi.ListenerEvent.DetectedStable)
+func (es *eventStream) detectedStable(event *ffcapi.ListenerEvent) bool {
+	if es.c.chainTrackingMode != ffcapi.ChainTrackingModeLight {
+		return false
+	}
+	head, ok := es.c.blockListener.GetHighestBlock(es.ctx)
+	//nolint:gosec // checkpointBlockGap is validated non-negative
+	return ok && event.Event.ID.BlockNumber.Uint64()+uint64(es.c.checkpointBlockGap) < head
 }
 
 func (es *eventStream) buildAggregatedListener(listeners []*listener) *aggregatedListener {

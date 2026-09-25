@@ -1225,6 +1225,7 @@ func TestDispatchListenerDone(t *testing.T) {
 	cancel()
 	es := &eventStream{
 		ctx:    doneCtx,
+		c:      &ethConnector{},
 		events: make(chan<- *ffcapi.ListenerEvent),
 	}
 	l := &listener{id: fftypes.NewUUID(), es: es}
@@ -1242,6 +1243,41 @@ func TestDispatchListenerDone(t *testing.T) {
 	_, lastDetected := l.getHWM()
 	assert.Equal(t, &listenerCheckpoint{Block: 1000, TransactionIndex: 10, LogIndex: 1}, lastDetected)
 
+}
+
+func TestDispatchMarksDetectedStableLightMode(t *testing.T) {
+
+	_, c, _, done := newLightModeTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsCheckpointBlockGap, 50)
+	})
+	defer done()
+	mbl := ethblocklistenermocks.NewBlockListener(t)
+	mbl.On("WaitClosed").Return().Maybe()
+	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1100), true)
+	c.blockListener = mbl
+
+	delivered := make(chan *ffcapi.ListenerEvent, 2)
+	es := &eventStream{ctx: context.Background(), c: c, events: delivered}
+	l := &listener{id: fftypes.NewUUID(), es: es}
+	ag := es.buildAggregatedListener([]*listener{l})
+	newEvent := func(block uint64) *ffcapi.ListenerEvent {
+		//nolint:gosec // test block numbers
+		return &ffcapi.ListenerEvent{
+			Checkpoint: &listenerCheckpoint{Block: int64(block)},
+			Event:      &ffcapi.Event{ID: ffcapi.EventID{ListenerID: l.id, BlockNumber: fftypes.FFuint64(block)}},
+		}
+	}
+
+	// With the head at 1100 the stable head is 1050: a block below it cannot be re-orged, a block at it still can
+	assert.False(t, es.markDetectedAndDispatch(ag, newEvent(1049)))
+	assert.False(t, es.markDetectedAndDispatch(ag, newEvent(1050)))
+	assert.True(t, (<-delivered).DetectedStable)
+	assert.False(t, (<-delivered).DetectedStable)
+
+	// Never set in full mode
+	c.chainTrackingMode = ffcapi.ChainTrackingModeFull
+	assert.False(t, es.markDetectedAndDispatch(ag, newEvent(1049)))
+	assert.False(t, (<-delivered).DetectedStable)
 }
 
 func TestFilterEnrichSortDedupesListenerWithMultipleFiltersSameTopic0(t *testing.T) {
@@ -1322,6 +1358,7 @@ func TestDispatchSetHWMDetectionBeforeScanPosition(t *testing.T) {
 	delivered := make(chan *ffcapi.ListenerEvent, 2)
 	es := &eventStream{
 		ctx:    context.Background(),
+		c:      &ethConnector{},
 		events: delivered,
 	}
 	l := &listener{id: fftypes.NewUUID(), es: es}
