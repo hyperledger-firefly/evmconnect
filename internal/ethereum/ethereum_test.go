@@ -145,19 +145,6 @@ func TestConnectorInitLightModeValidation(t *testing.T) {
 	err = newConnector(mRPC, func(conf config.Section) {})
 	assert.NoError(t, err)
 }
-
-func TestConnectorInitLightModeOverrides(t *testing.T) {
-
-	// Server filter polling is overridden to client in light mode. Block timestamps only warn
-	_, c, _, done := newLightModeTestConnector(t, func(conf config.Section) {
-		conf.Set(EventsFilterPollingMode, string(FilterPollingModeServer))
-		conf.Set(EventsBlockTimestamps, true)
-	})
-	defer done()
-	assert.Equal(t, FilterPollingModeClient, c.eventFilterPollingMode)
-	assert.True(t, c.eventBlockTimestamps)
-}
-
 func TestConnectorInitLightModeRangeProbeWarnings(t *testing.T) {
 
 	// The probe is advisory - neither outcome below stops the connector starting (the connectors
