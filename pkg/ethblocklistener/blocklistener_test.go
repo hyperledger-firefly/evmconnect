@@ -1398,7 +1398,7 @@ func TestBlockListenerWaitUntilStartedOnlyReturnsAfterEstablishingBlockFilter(t 
 	mockInitialBlockHeight(mRPC, 1000)
 	mockSeedBlockNotFound(mRPC, 951)
 	mockNewBlockFilter(mRPC, testBlockFilterID1)
-	mockFilterChangesEmpty(mRPC)
+	mockFilterChangesEmpty(mRPC).Maybe() // done() can race the first poll
 
 	assert.False(t, bl.isStarted)
 	bl.checkAndStartListenerLoop()

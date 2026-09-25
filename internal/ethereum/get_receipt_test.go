@@ -305,7 +305,7 @@ func TestGetReceiptNotFoundLightMode(t *testing.T) {
 	req.BlockNumber = fftypes.NewFFBigInt(1000)
 	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(1099), true).Once()
 	res, reason, err = c.TransactionReceipt(ctx, &req)
-	assert.Regexp(t, "FF23083.*1,000.*1,099", err)
+	assert.Regexp(t, "FF23082.*1,000.*1,099", err)
 	assert.Equal(t, ffcapi.ErrorReasonNodeBehind, reason)
 	assert.Nil(t, res)
 
@@ -318,7 +318,7 @@ func TestGetReceiptNotFoundLightMode(t *testing.T) {
 	// The block listener closing is transient too
 	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(0), false).Once()
 	_, reason, err = c.TransactionReceipt(ctx, &req)
-	assert.Regexp(t, "FF23083", err)
+	assert.Regexp(t, "FF23082", err)
 	assert.Equal(t, ffcapi.ErrorReasonNodeBehind, reason)
 
 	// Full mode ignores the block number
@@ -363,7 +363,7 @@ func TestGetReceiptBlockMismatchLightMode(t *testing.T) {
 	req.BlockHash = "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
 	mbl.On("GetHighestBlock", mock.Anything).Return(uint64(2076), true).Once()
 	res, reason, err = c.TransactionReceipt(ctx, &req)
-	assert.Regexp(t, "FF23084.*1,977.*0x6197.*0x3c3c.*2,076", err)
+	assert.Regexp(t, "FF23083.*1,977.*0x6197.*0x3c3c.*2,076", err)
 	assert.Equal(t, ffcapi.ErrorReasonNodeBehind, reason)
 	assert.Nil(t, res)
 

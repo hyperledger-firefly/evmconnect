@@ -139,18 +139,23 @@ func TestConnectorInitLightModeValidation(t *testing.T) {
 	})
 	assert.Regexp(t, "FF23081.*50.*51", err)
 
-	// Node-side filters are bound to a single node, so only client filter polling is allowed
-	err = newConnector(&rpcbackendmocks.Backend{}, func(conf config.Section) {
-		conf.Set(EventsFilterPollingMode, string(FilterPollingModeServer))
-	})
-	assert.Regexp(t, "FF23082.*server", err)
-
-	// Defaults (page size 500, gap 50, block timestamps on - a warning only) are valid, and the
-	// range probe runs as part of construction
+	// Defaults (page size 500, gap 50) are valid, and the range probe runs as part of construction
 	mRPC := &rpcbackendmocks.Backend{}
 	mockLightModeRangeProbe(mRPC)
 	err = newConnector(mRPC, func(conf config.Section) {})
 	assert.NoError(t, err)
+}
+
+func TestConnectorInitLightModeOverrides(t *testing.T) {
+
+	// Server filter polling is overridden to client in light mode. Block timestamps only warn
+	_, c, _, done := newLightModeTestConnector(t, func(conf config.Section) {
+		conf.Set(EventsFilterPollingMode, string(FilterPollingModeServer))
+		conf.Set(EventsBlockTimestamps, true)
+	})
+	defer done()
+	assert.Equal(t, FilterPollingModeClient, c.eventFilterPollingMode)
+	assert.True(t, c.eventBlockTimestamps)
 }
 
 func TestConnectorInitLightModeRangeProbeWarnings(t *testing.T) {
