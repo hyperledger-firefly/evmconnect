@@ -1398,7 +1398,7 @@ func TestBlockListenerWaitUntilStartedOnlyReturnsAfterEstablishingBlockFilter(t 
 	mockInitialBlockHeight(mRPC, 1000)
 	mockSeedBlockNotFound(mRPC, 951)
 	mockNewBlockFilter(mRPC, testBlockFilterID1)
-	mockFilterChangesEmpty(mRPC)
+	mockFilterChangesEmpty(mRPC).Maybe() // done() can race the first poll
 
 	assert.False(t, bl.isStarted)
 	bl.checkAndStartListenerLoop()
@@ -1471,6 +1471,65 @@ func TestBlockListenerHeadBlockNumber_DispatchesAndSkipsDuplicateHead(t *testing
 	// GetHighestBlock must track the live head in light mode too (not freeze at the startup height),
 	// as it drives the poll position of event streams
 	assert.Equal(t, uint64(1001), bl.highestBlock)
+	mRPC.AssertExpectations(t)
+}
+
+// TestBlockListenerLightModeHeadForwardOnly exercises the drift handling of light chain tracking mode:
+// each eth_blockNumber poll can be answered by a different load-balanced node, so a reading below the
+// highest head already observed is ignored (up to MonitoredHeadLength behind), while a reading further
+// behind than that is accepted as a chain reset.
+func TestBlockListenerLightModeHeadForwardOnly(t *testing.T) {
+	startLatch := newTestLatch()
+	var bnCall int
+	_, bl, mRPC, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
+		conf.BlockPollingInterval = shortDelay
+		conf.ChainTrackingMode = ffcapi.ChainTrackingModeLight
+		conf.MonitoredHeadLength = 10
+
+		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
+			bnCall++
+			var v uint64
+			switch bnCall {
+			case 1:
+				v = 1000 // establishBlockHeightWithRetry
+			case 2:
+				startLatch.waitComplete()
+				v = 1000 // first refresh → dispatch
+			case 3:
+				v = 995 // a node behind, within the tolerated drift → ignored
+			case 4:
+				v = 990 // exactly MonitoredHeadLength behind → still ignored
+			case 5:
+				v = 1001 // head advanced → dispatch
+			case 6:
+				v = 500 // more than MonitoredHeadLength behind → a chain reset, accepted
+			default:
+				v = 500
+			}
+			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(v)
+		}).Maybe()
+	})
+	defer done()
+
+	updates := make(chan *ffcapi.BlockHashEvent, 16)
+	bl.AddConsumer(context.Background(), &BlockUpdateConsumer{
+		ID:      fftypes.NewUUID(),
+		Ctx:     context.Background(),
+		Updates: updates,
+	})
+	startLatch.complete()
+
+	assert.Equal(t, uint64(1000), (<-updates).HeadBlockNumber)
+	assert.Equal(t, uint64(1001), (<-updates).HeadBlockNumber)
+	assert.Equal(t, uint64(500), (<-updates).HeadBlockNumber)
+
+	done()
+	<-bl.listenLoopDone
+
+	assert.Equal(t, uint64(500), bl.GetHeadBlockNumber(context.Background()))
+	highest, ok := bl.GetHighestBlock(context.Background())
+	assert.True(t, ok)
+	assert.Equal(t, uint64(500), highest)
 	mRPC.AssertExpectations(t)
 }
 

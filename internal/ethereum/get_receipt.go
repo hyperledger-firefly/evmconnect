@@ -176,7 +176,18 @@ func (c *ethConnector) TransactionReceipt(ctx context.Context, req *ffcapi.Trans
 		return nil, "", rpcErr.Error()
 	}
 	if ethReceipt == nil {
+		if observedHead, definitive := c.receiptDefinitive(ctx, req); !definitive {
+			return nil, ffcapi.ErrorReasonNodeBehind, i18n.NewError(ctx, msgs.MsgReceiptNodeBehind, req.TransactionHash, req.BlockNumber.Uint64(), observedHead)
+		}
 		return nil, ffcapi.ErrorReasonNotFound, i18n.NewError(ctx, msgs.MsgReceiptNotAvailable, req.TransactionHash)
+	}
+	if req.BlockHash != "" && !strings.EqualFold(ethReceipt.BlockHash.String(), req.BlockHash) {
+		// A node on a losing fork can report the transaction in another block. The caller drops the event it
+		// saw when the block differs, so hold this answer back until it is definitive, as for a null receipt.
+		if observedHead, definitive := c.receiptDefinitive(ctx, req); !definitive {
+			return nil, ffcapi.ErrorReasonNodeBehind, i18n.NewError(ctx, msgs.MsgReceiptBlockMismatchNodeBehind, req.TransactionHash,
+				ethReceipt.BlockNumber.Uint64(), ethReceipt.BlockHash, req.BlockNumber.Uint64(), req.BlockHash, observedHead)
+		}
 	}
 
 	// Enrich the receipt with error information and build it up into the FFTM object
@@ -214,6 +225,22 @@ func (c *ethConnector) TransactionReceipt(ctx context.Context, req *ffcapi.Trans
 	}
 
 	return receiptResponse, "", nil
+}
+
+// receiptDefinitive reports whether, in light chain tracking mode, a receipt answer that disagrees with what
+// the caller saw can be trusted. That is a null receipt, or a receipt in a different block from req.BlockHash.
+// req.BlockNumber is the block the caller saw the transaction in. The node that answered can be up to
+// checkpointBlockGap (D) behind the highest head we observed, and a node at the same height can be on another
+// fork. So the answer is only definitive once every node is expected to be D past that block, which is
+// observedHead >= blockNumber + 2D. Until then the caller gets ErrorReasonNodeBehind, and retries as the head
+// advances. In full mode, or without a block number, the answer is always definitive.
+func (c *ethConnector) receiptDefinitive(ctx context.Context, req *ffcapi.TransactionReceiptRequest) (observedHead uint64, definitive bool) {
+	if c.chainTrackingMode != ffcapi.ChainTrackingModeLight || req.BlockNumber == nil {
+		return 0, true
+	}
+	observedHead, ok := c.blockListener.GetHighestBlock(ctx)
+	//nolint:gosec // checkpointBlockGap is validated non-negative
+	return observedHead, ok && observedHead >= req.BlockNumber.Uint64()+2*uint64(c.checkpointBlockGap)
 }
 
 // enrichTransactionReceipt tries to get the error information

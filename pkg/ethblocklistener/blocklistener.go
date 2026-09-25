@@ -100,6 +100,10 @@ type BlockListener interface {
 	SnapshotMonitoredHeadChain() []*ethrpc.BlockInfoJSONRPC // snapshot the whole view, with complete blocks, using the read-lock.
 	WaitClosed()
 	InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error
+	// Light chain tracking mode drift accounting (see ffcapi.ChainTrackingModeLight), recorded by the
+	// event streams that observe the eth_getLogs failures - no-ops without metrics initialized.
+	IncLightModeRangeAhead()     // an eth_getLogs page above the stable threshold was rejected (a node behind the observed head - expected, retried without backoff)
+	IncLightModeDriftViolation() // an eth_getLogs page at/below the stable threshold was rejected (a node more than checkpointBlockGap behind - a drift violation)
 }
 
 func toMinimalBlockInfoList(blocks []*ethrpc.BlockInfoJSONRPC) []*ethrpc.MinimalBlockInfo {
@@ -150,7 +154,9 @@ type blockListener struct {
 	txReceiptCacheLock       sync.RWMutex
 	txReceiptCacheGeneration uint64
 
-	// headBlockNumber mode: last head value sent on the block listener channel (only written from listenLoop)
+	// light chain tracking mode: the highest head seen via eth_blockNumber, and the last value sent on the
+	// block listener channel. Only written from listenLoop, under canonicalChainLock (see acceptHeadBlockNumber
+	// for the drift handling that keeps it forward-only)
 	currentChainHead uint64
 
 	// metrics are optional - only emitted once InitMetrics has been called
@@ -662,8 +668,42 @@ func (bl *blockListener) GetBlockGasLimit() *ethtypes.HexInteger {
 	return bl.headBlockInfo.GasLimit
 }
 
+// GetHeadBlockNumber returns the highest head observed in light chain tracking mode (zero before the
+// first poll). It only moves backwards for a chain reset - see acceptHeadBlockNumber.
 func (bl *blockListener) GetHeadBlockNumber(_ context.Context) uint64 {
+	bl.canonicalChainLock.RLock()
+	defer bl.canonicalChainLock.RUnlock()
 	return bl.currentChainHead
+}
+
+// acceptHeadBlockNumber applies a head reading from eth_blockNumber in light chain tracking mode, returning
+// whether the head we track changed. Each poll can be answered by a different load-balanced node, and the
+// nodes are not guaranteed to be at the same height: a reading below the head we already hold is expected
+// drift, and is ignored - the head is forward-only, so the stable threshold (head - monitoredHeadLength)
+// consumers derive from it never moves backwards. A reading more than monitoredHeadLength below is beyond
+// the drift we tolerate (any node that far behind would already be breaking event delivery), so it is
+// accepted as a chain reset - the chain has genuinely been rebuilt shorter (a development chain restart).
+func (bl *blockListener) acceptHeadBlockNumber(head uint64) bool {
+	bl.canonicalChainLock.Lock()
+	current := bl.currentChainHead
+	switch {
+	case head == current:
+		bl.canonicalChainLock.Unlock()
+		return false
+	case head < current && current-head <= bl.monitoredHeadLength:
+		bl.canonicalChainLock.Unlock()
+		log.L(bl.ctx).Debugf("Ignoring head %d below the highest observed head %d (node behind)", head, current)
+		bl.incLightModeDriftMetric(metricLightModeDriftHeadBehind)
+		return false
+	case head < current:
+		log.L(bl.ctx).Warnf("Head %d is more than %d blocks below the highest observed head %d - accepting as a chain reset", head, bl.monitoredHeadLength, current)
+	}
+	bl.currentChainHead = head
+	bl.highestBlock = head
+	bl.highestBlockSet = true
+	bl.canonicalChainLock.Unlock()
+	bl.setBlockHeightMetric(metricCanonicalBlockHeight, head)
+	return true
 }
 
 func (bl *blockListener) setHighestBlock(block uint64) {

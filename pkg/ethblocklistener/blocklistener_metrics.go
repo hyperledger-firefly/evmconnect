@@ -38,6 +38,17 @@ const (
 	// metricPollFailures counts the JSON/RPC polls the listen loop makes that failed, labelled by method.
 	metricPollFailures      = "poll_failures_total"
 	metricLabelPollFailures = "method"
+	// metricLightModeDrift counts, in light chain tracking mode, the observations that load-balanced nodes
+	// are at different heights, labelled by kind:
+	//  - head_behind: an eth_blockNumber reading below the highest head already observed (ignored)
+	//  - range_ahead: an eth_getLogs page above the stable threshold was rejected (expected - retried)
+	//  - drift_violation: an eth_getLogs page at/below the stable threshold was rejected, so a node is
+	//    more than checkpointBlockGap behind the observed head, which is outside the tolerated drift
+	metricLightModeDrift               = "light_mode_drift_total"
+	metricLabelLightModeDrift          = "kind"
+	metricLightModeDriftHeadBehind     = "head_behind"
+	metricLightModeDriftRangeAhead     = "range_ahead"
+	metricLightModeDriftDriftViolation = "drift_violation"
 )
 
 // InitMetrics registers the block listener metrics against the supplied registry.
@@ -49,6 +60,7 @@ func (bl *blockListener) InitMetrics(ctx context.Context, registry metric.Metric
 	mm.NewGaugeMetric(ctx, metricTargetBlockHeight, "The block height reported by the connected node via eth_blockNumber", false)
 	mm.NewGaugeMetric(ctx, metricCanonicalBlockHeight, "The block height of the head of the chain tracked by the block listener", false)
 	mm.NewCounterMetricWithLabels(ctx, metricPollFailures, "The number of block listener JSON/RPC polls that have failed, by method", []string{metricLabelPollFailures}, false)
+	mm.NewCounterMetricWithLabels(ctx, metricLightModeDrift, "The number of times, in light chain tracking mode, a JSON/RPC response showed the answering node behind the highest observed chain head, by kind", []string{metricLabelLightModeDrift}, false)
 
 	bl.metricsLock.Lock()
 	defer bl.metricsLock.Unlock()
@@ -76,6 +88,22 @@ func (bl *blockListener) incPollFailureMetric(method string) {
 		return
 	}
 	mm.IncCounterMetricWithLabels(bl.ctx, metricPollFailures, map[string]string{metricLabelPollFailures: method}, nil)
+}
+
+func (bl *blockListener) incLightModeDriftMetric(kind string) {
+	mm := bl.getMetrics()
+	if mm == nil {
+		return
+	}
+	mm.IncCounterMetricWithLabels(bl.ctx, metricLightModeDrift, map[string]string{metricLabelLightModeDrift: kind}, nil)
+}
+
+func (bl *blockListener) IncLightModeRangeAhead() {
+	bl.incLightModeDriftMetric(metricLightModeDriftRangeAhead)
+}
+
+func (bl *blockListener) IncLightModeDriftViolation() {
+	bl.incLightModeDriftMetric(metricLightModeDriftDriftViolation)
 }
 
 // refreshTargetBlockHeightMetric queries the node for the height it reports, purely so the target gauge

@@ -281,6 +281,41 @@ func TestListenerCatchupScalesBackToOne(t *testing.T) {
 	assert.Equal(t, int64(1), l.c.catchupPageSize)
 }
 
+func TestListenerCatchupScalesBackFloorsAtGapLightMode(t *testing.T) {
+
+	l, mRPC, cancelCtx := newTestListener(t, false)
+	l.c.chainTrackingMode = ffcapi.ChainTrackingModeLight
+	l.c.checkpointBlockGap = 50
+
+	l.catchupLoopDone = make(chan struct{})
+	l.hwmBlock = 0
+
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "net_version", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		l.ee.connector.chainID = "12345"
+	}).Once()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getBlockByHash", mock.MatchedBy(func(bh string) bool {
+		return bh == "0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c"
+	}), false).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(**ethrpc.EVMBlockWithTxHashesJSONRPC) = &ethrpc.EVMBlockWithTxHashesJSONRPC{BlockHeaderJSONRPC: ethrpc.BlockHeaderJSONRPC{
+			Number: ethtypes.HexUint64(1001),
+		}}
+	})
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(&rpcbackend.RPCError{Message: "Response size is larger than 150MB limit"}).Times(6)
+	// A failure that does not match the downscale regex is classified as a drift violation in light
+	// mode (listener catchup never polls above the stable threshold)
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(&rpcbackend.RPCError{Message: "pop"}).Once()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*[]*ethrpc.LogJSONRPC) = []*ethrpc.LogJSONRPC{sampleTransferLog()}
+		// Cancel the context here so we exit pushing the event
+		cancelCtx()
+	})
+
+	l.listenerCatchupLoop()
+
+	// 500 → 250 → 125 → 62 → 51 (the floor of checkpointBlockGap+1), where it holds
+	assert.Equal(t, int64(51), l.c.getCatchupPageSize())
+}
+
 func TestListenerNoCatchupScaleBackOnErrorMismatch(t *testing.T) {
 
 	l, mRPC, cancelCtx := newTestListener(t, false)

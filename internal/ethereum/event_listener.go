@@ -211,7 +211,7 @@ func (l *listener) listenerCatchupLoop() {
 		// from as already scanned, and can never re-detect events a re-org introduces into them.
 		headBlock, established := l.es.catchupCeiling()
 		fromBlock := l.getHWMBlock()
-		toBlock := fromBlock + l.c.catchupPageSize - 1
+		toBlock := fromBlock + l.c.getCatchupPageSize() - 1
 		if established && toBlock >= headBlock {
 			toBlock = headBlock - 1 // the resulting HWM (toBlock+1) is at most headBlock
 		}
@@ -231,15 +231,12 @@ func (l *listener) listenerCatchupLoop() {
 		if err != nil {
 			if l.c.catchupDownscaleRegex.String() != "" && l.c.catchupDownscaleRegex.MatchString(err.Error()) {
 				log.L(ctx).Warnf("Failed to query block range fromBlock=%d toBlock=%d. Error %s matches configured downscale regex, catchup page size will automatically be reduced", fromBlock, toBlock, err.Error())
-				if l.c.catchupPageSize > 1 {
-					l.c.catchupPageSize /= 2
-
-					if l.c.catchupPageSize < 20 {
-						log.L(ctx).Warnf("Catchup page size auto-reduced to extremely low value %d. The connector may never catch up with the head of the chain.", l.c.catchupPageSize)
-					}
-				}
+				l.c.downscaleCatchupPageSize(ctx)
 			} else {
-				log.L(ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d: %s", fromBlock, toBlock, err)
+				// Listener catchup never polls past the lead group's committed position, which in
+				// light mode is at/below the stable threshold - so a failure there is never an
+				// expected range-ahead rejection
+				_ = l.es.rangeQueryFailed(ctx, fromBlock, toBlock, headBlock, false, err)
 			}
 			failCount++ // for exponential backoff calculation
 			continue

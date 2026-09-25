@@ -305,13 +305,15 @@ func (es *eventStream) leadGroupCatchup() bool {
 		}
 
 		// Poll in the range for events
-		toBlock := fromBlock + es.c.catchupPageSize - 1
+		toBlock := fromBlock + es.c.getCatchupPageSize() - 1
 		if toBlock > pollableHead {
 			toBlock = pollableHead
 		}
 		events, err := es.getBlockRangeEvents(es.ctx, ag, fromBlock, toBlock)
 		if err != nil {
-			log.L(es.ctx).Errorf("Failed to query block range fromBlock=%d toBlock=%d headBlock=%d: %s", fromBlock, toBlock, chainHeadBlock, err)
+			// Catchup never polls above the stable threshold, so in light mode any failure is a
+			// drift violation (or an outage) - never an expected range-ahead rejection
+			_ = es.rangeQueryFailed(es.ctx, fromBlock, toBlock, blockNumberToInt64(chainHeadBlock), false, err)
 			failCount++
 			continue
 		}
@@ -578,6 +580,7 @@ func (es *eventStream) dispatchSetHWMCheckExit(ag *aggregatedListener, events ff
 // markDetectedAndDispatch records the detection point then (importantly afterwards) pushes the event to FFTM
 func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ffcapi.ListenerEvent) (exiting bool) {
 	log.L(es.ctx).Debugf("Detected event %s", event.Event)
+	event.DetectedStable = es.detectedStable(event)
 
 	// ListenerID is set in filterEnrichEthLog and must be non-nil
 	ag.listenersByID[*event.Event.ID.ListenerID].markDetected(event.Checkpoint.(*listenerCheckpoint))
@@ -588,6 +591,18 @@ func (es *eventStream) markDetectedAndDispatch(ag *aggregatedListener, event *ff
 		return true
 	}
 
+}
+
+// detectedStable reports, in light chain tracking mode, whether the event's block is already behind the stable
+// head (checkpointBlockGap behind the highest head observed), so no re-org can remove it. FFTM confirms such an
+// event by head count without validating its receipt (see ffcapi.ListenerEvent.DetectedStable)
+func (es *eventStream) detectedStable(event *ffcapi.ListenerEvent) bool {
+	if es.c.chainTrackingMode != ffcapi.ChainTrackingModeLight {
+		return false
+	}
+	head, ok := es.c.blockListener.GetHighestBlock(es.ctx)
+	//nolint:gosec // checkpointBlockGap is validated non-negative
+	return ok && event.Event.ID.BlockNumber.Uint64()+uint64(es.c.checkpointBlockGap) < head
 }
 
 func (es *eventStream) buildAggregatedListener(listeners []*listener) *aggregatedListener {

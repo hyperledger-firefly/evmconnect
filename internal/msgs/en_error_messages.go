@@ -98,4 +98,7 @@ var (
 	MsgInvalidFilterPollingMode                 = ffe("FF23078", "Invalid filter polling mode '%s': must be 'server' or 'client'")
 	MsgCatchupPageSizeInvalid                   = ffe("FF23079", "Catchup page size must be greater than or equal to 1 value=%d")
 	MsgLatestBlockNotFound                      = ffe("FF23080", "The node returned no latest block")
+	MsgLightModeCatchupPageSizeInvalid          = ffe("FF23081", "In light chain tracking mode the catchup page size (%d) must be at least checkpointBlockGap+1 (%d), so a single page covers the unstable window at the head of the chain")
+	MsgReceiptNodeBehind                        = ffe("FF23082", "Receipt not available for transaction '%s' expected in block %d: the node that answered may be behind the observed chain head %d")
+	MsgReceiptBlockMismatchNodeBehind           = ffe("FF23083", "Receipt for transaction '%s' is in block %d / %s, not the expected block %d / %s: the node that answered may be on a different fork, or behind the observed chain head %d")
 )

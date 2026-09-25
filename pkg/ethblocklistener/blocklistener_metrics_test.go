@@ -67,6 +67,25 @@ func readPollFailureMetric(t *testing.T, registry metric.MetricsRegistry, method
 	return 0
 }
 
+// readLightModeDriftMetric returns the current count of light mode drift observations of the given kind
+func readLightModeDriftMetric(t *testing.T, registry metric.MetricsRegistry, kind string) float64 {
+	mfs, err := registry.GetGatherer().Gather()
+	require.NoError(t, err)
+	fullName := "ff_" + metricsSubsystem + "_" + metricLightModeDrift
+	for _, mf := range mfs {
+		if mf.GetName() == fullName {
+			for _, m := range mf.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == metricLabelLightModeDrift && l.GetValue() == kind {
+						return m.GetCounter().GetValue()
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
 func waitForGaugeMetric(t *testing.T, registry metric.MetricsRegistry, metricName string, expected float64) {
 	assert.Eventually(t, func() bool {
 		v, ok := readGaugeMetric(t, registry, metricName)
@@ -240,12 +259,18 @@ func TestBlockListenerMetricsFullModeFilterFail(t *testing.T) {
 }
 
 func TestBlockListenerMetricsLightMode(t *testing.T) {
+	var bnCall int
 	ctx, bl, _, done := newTestBlockListener(t, func(conf *BlockListenerConfig, mRPC *rpcbackendmocks.Backend, _ context.CancelFunc) {
 		conf.ChainTrackingMode = ffcapi.ChainTrackingModeLight
 		conf.BlockPollingInterval = 1 * time.Millisecond
 
 		mRPC.On("CallRPC", mock.Anything, mock.Anything, "eth_blockNumber").Return(nil).Run(func(args mock.Arguments) {
-			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(2000)
+			bnCall++
+			v := uint64(2000)
+			if bnCall > 2 {
+				v = 1990 // a node behind the observed head - the target gauge reports it, the tracked head holds
+			}
+			*args[1].(*ethtypes.HexInteger) = *ethtypes.NewHexIntegerU64(v)
 		})
 	})
 	defer done()
@@ -260,6 +285,26 @@ func TestBlockListenerMetricsLightMode(t *testing.T) {
 	})
 
 	// In light mode there is no canonical chain, so the head we dispatch is the height we track
-	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 2000)
 	waitForGaugeMetric(t, registry, metricCanonicalBlockHeight, 2000)
+	waitForGaugeMetric(t, registry, metricTargetBlockHeight, 1990)
+	assert.Eventually(t, func() bool {
+		return readLightModeDriftMetric(t, registry, metricLightModeDriftHeadBehind) > 0
+	}, 5*time.Second, time.Millisecond)
+	v, _ := readGaugeMetric(t, registry, metricCanonicalBlockHeight)
+	assert.Equal(t, float64(2000), v)
+
+	// The event streams record the eth_getLogs side of drift through the interface
+	bl.IncLightModeRangeAhead()
+	bl.IncLightModeDriftViolation()
+	assert.Equal(t, float64(1), readLightModeDriftMetric(t, registry, metricLightModeDriftRangeAhead))
+	assert.Equal(t, float64(1), readLightModeDriftMetric(t, registry, metricLightModeDriftDriftViolation))
+}
+
+func TestBlockListenerLightModeDriftMetricsNoRegistry(t *testing.T) {
+	_, bl, _, done := newTestBlockListener(t)
+	defer done()
+
+	// No-ops without InitMetrics
+	bl.IncLightModeRangeAhead()
+	bl.IncLightModeDriftViolation()
 }

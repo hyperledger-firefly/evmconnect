@@ -304,6 +304,16 @@ func (_m *BlockListener) GetMonitoredHeadLength() int {
 	return r0
 }
 
+// IncLightModeDriftViolation provides a mock function with no fields
+func (_m *BlockListener) IncLightModeDriftViolation() {
+	_m.Called()
+}
+
+// IncLightModeRangeAhead provides a mock function with no fields
+func (_m *BlockListener) IncLightModeRangeAhead() {
+	_m.Called()
+}
+
 // InitMetrics provides a mock function with given fields: ctx, registry
 func (_m *BlockListener) InitMetrics(ctx context.Context, registry metric.MetricsRegistry) error {
 	ret := _m.Called(ctx, registry)
