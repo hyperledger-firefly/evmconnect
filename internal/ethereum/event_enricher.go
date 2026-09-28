@@ -84,16 +84,21 @@ func (ee *eventEnricher) filterEnrichEthLog(ctx context.Context, f *eventFilter,
 
 	var timestamp *fftypes.FFTime
 	if ee.connector.eventBlockTimestamps {
-		bi, err := ee.connector.blockListener.GetBlockInfoByHash(ctx, ethLog.BlockHash.String())
-		if err != nil {
-			log.L(ctx).Errorf("Failed to get block info timestamp for block '%s': %v", ethLog.BlockHash, err)
-			return nil, matched, decoded, err // This is an error condition, rather than just something we cannot enrich
+		if ethLog.BlockTimestamp != nil {
+			// Newer nodes return the block timestamp on the log itself, so no extra JSON/RPC call is needed
+			timestamp = fftypes.UnixTime(int64(ethLog.BlockTimestamp.Uint64())) // nolint:gosec // same as below
+		} else {
+			bi, err := ee.connector.blockListener.GetBlockInfoByHash(ctx, ethLog.BlockHash.String())
+			if err != nil {
+				log.L(ctx).Errorf("Failed to get block info timestamp for block '%s': %v", ethLog.BlockHash, err)
+				return nil, matched, decoded, err // This is an error condition, rather than just something we cannot enrich
+			}
+			if bi == nil {
+				log.L(ctx).Errorf("Failed to get block info timestamp for block '%s': block not found", ethLog.BlockHash)
+				return nil, matched, decoded, i18n.NewError(ctx, msgs.MsgBlockNotAvailable)
+			}
+			timestamp = fftypes.UnixTime(int64(bi.Timestamp.Uint64())) // nolint:gosec // this is what it is - we don't accept negative time, and unix doesn't support full uint64 range
 		}
-		if bi == nil {
-			log.L(ctx).Errorf("Failed to get block info timestamp for block '%s': block not found", ethLog.BlockHash)
-			return nil, matched, decoded, i18n.NewError(ctx, msgs.MsgBlockNotAvailable)
-		}
-		timestamp = fftypes.UnixTime(int64(bi.Timestamp.Uint64())) // nolint:gosec // this is what it is - we don't accept negative time, and unix doesn't support full uint64 range
 	}
 
 	if len(methods) > 0 || ee.extractSigner {

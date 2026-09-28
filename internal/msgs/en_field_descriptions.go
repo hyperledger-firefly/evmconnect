@@ -76,6 +76,7 @@ var (
 	_ = ffm("LogJSONRPC.transactionIndex", `QUANTITY - integer of the transactions index position log was created from. null when its pending log.`)
 	_ = ffm("LogJSONRPC.transactionHash", `DATA, 32 Bytes - hash of the transactions this log was created from. null when its pending log.`)
 	_ = ffm("LogJSONRPC.blockHash", `DATA, 32 Bytes - hash of the block where this log was in. null when its pending. null when its pending log.`)
+	_ = ffm("LogJSONRPC.blockTimestamp", `QUANTITY - the unix timestamp of the block where this log was in. Only returned by nodes that support it.`)
 	_ = ffm("LogJSONRPC.blockNumber", `QUANTITY - the block number where this log was in. null when its pending. null when its pending log.`)
 	_ = ffm("LogJSONRPC.address", `DATA, 20 Bytes - address from which this log originated.`)
 	_ = ffm("LogJSONRPC.data", `DATA - variable-length non-indexed log data. (In solidity: zero or more 32 Bytes non-indexed log arguments.)`)

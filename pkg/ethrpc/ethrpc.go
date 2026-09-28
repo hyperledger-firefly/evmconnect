@@ -147,6 +147,7 @@ type LogJSONRPC struct {
 	BlockNumber      ethtypes.HexUint64          `json:"blockNumber" ffstruct:"LogJSONRPC"`
 	TransactionHash  ethtypes.HexBytes0xPrefix   `json:"transactionHash" ffstruct:"LogJSONRPC"`
 	BlockHash        ethtypes.HexBytes0xPrefix   `json:"blockHash" ffstruct:"LogJSONRPC"`
+	BlockTimestamp   *ethtypes.HexUint64         `json:"blockTimestamp,omitempty" ffstruct:"LogJSONRPC"`
 	Address          *ethtypes.Address0xHex      `json:"address" ffstruct:"LogJSONRPC"`
 	Data             ethtypes.HexBytes0xPrefix   `json:"data" ffstruct:"LogJSONRPC"`
 	Topics           []ethtypes.HexBytes0xPrefix `json:"topics" ffstruct:"LogJSONRPC"`
