@@ -98,6 +98,61 @@ func TestEventEnricher_FilterEnrichEthLog_BasicMatch(t *testing.T) {
 	// Decoded may be false if no data, but should not error
 }
 
+func TestEventEnricher_FilterEnrichEthLog_TimestampFromLog(t *testing.T) {
+	_, conn, mRPC, done := newTestConnector(t)
+	defer done()
+	mRPC.On("CallRPC", mock.Anything, mock.Anything, "net_version", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		*args[1].(*string) = "1"
+	}).Maybe()
+	// No eth_getBlockByHash mock - the timestamp must come from the log
+
+	conn.eventBlockTimestamps = true
+	ee := &eventEnricher{
+		connector:     conn,
+		extractSigner: false,
+	}
+
+	var eventABI *abi.Entry
+	err := json.Unmarshal([]byte(`{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "name": "from", "type": "address"},
+			{"indexed": true, "name": "to", "type": "address"},
+			{"indexed": false, "name": "value", "type": "uint256"}
+		],
+		"name": "Transfer",
+		"type": "event"
+	}`), &eventABI)
+	assert.NoError(t, err)
+
+	topic0, err := eventABI.SignatureHashCtx(context.Background())
+	assert.NoError(t, err)
+	addr := ethtypes.MustNewAddress("0x112233445566778899aabbccddeeff0011223344")
+	filter := &eventFilter{
+		Topic0:  topic0,
+		Address: addr,
+		Event:   eventABI,
+	}
+
+	var log *ethrpc.LogJSONRPC
+	err = json.Unmarshal([]byte(`{
+		"address": "0x112233445566778899aabbccddeeff0011223344",
+		"topics": ["`+topic0.String()+`"],
+		"data": "0x",
+		"blockNumber": "0x64",
+		"transactionIndex": "0x1",
+		"logIndex": "0x0",
+		"blockHash": "0x6b012339fbb85b70c58ecfd97b31950c4a28bcef5226e12dbe551cb1abaf3b4c",
+		"blockTimestamp": "0x6553f100"
+	}`), &log)
+	require.NoError(t, err)
+
+	ev, matched, _, err := ee.filterEnrichEthLog(context.Background(), filter, nil, log)
+	require.NoError(t, err)
+	assert.True(t, matched)
+	assert.Equal(t, int64(0x6553f100), ev.ID.Timestamp.Time().Unix())
+}
+
 func TestEventEnricher_FilterEnrichEthLog_TopicNoMatch(t *testing.T) {
 	_, conn, _, done := newTestConnector(t)
 	defer done()

@@ -160,7 +160,7 @@ func NewEthereumConnectorWithRPC(ctx context.Context, conf config.Section, rpc e
 			return nil, i18n.NewError(ctx, msgs.MsgLightModeCatchupPageSizeInvalid, c.catchupPageSize, c.checkpointBlockGap+1)
 		}
 		if c.eventBlockTimestamps {
-			log.L(ctx).Warnf("Light chain tracking mode with %s=true fetches each block by hash to obtain its timestamp - a fail-safe extra JSON/RPC call per block with events, that can be avoided by setting it false", EventsBlockTimestamps)
+			log.L(ctx).Warnf("Light chain tracking mode with %s=true may fetch each block by hash to obtain its timestamp if the node does not return it on the log itself, that can be avoided by setting it false", EventsBlockTimestamps)
 		}
 		c.verifyLightModeRangeErrors(ctx)
 	}
