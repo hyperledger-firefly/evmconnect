@@ -147,7 +147,7 @@ type LogJSONRPC struct {
 	BlockNumber      ethtypes.HexUint64          `json:"blockNumber" ffstruct:"LogJSONRPC"`
 	TransactionHash  ethtypes.HexBytes0xPrefix   `json:"transactionHash" ffstruct:"LogJSONRPC"`
 	BlockHash        ethtypes.HexBytes0xPrefix   `json:"blockHash" ffstruct:"LogJSONRPC"`
-	BlockTimestamp   *ethtypes.HexUint64         `json:"blockTimestamp,omitempty" ffstruct:"LogJSONRPC"` // note: not supported by all clients
+	BlockTimestamp   *ethtypes.HexUint64         `json:"blockTimestamp,omitempty" ffstruct:"LogJSONRPC"` // note: not supported by all nodes
 	Address          *ethtypes.Address0xHex      `json:"address" ffstruct:"LogJSONRPC"`
 	Data             ethtypes.HexBytes0xPrefix   `json:"data" ffstruct:"LogJSONRPC"`
 	Topics           []ethtypes.HexBytes0xPrefix `json:"topics" ffstruct:"LogJSONRPC"`
@@ -158,7 +158,7 @@ func (l *LogJSONRPC) FormatMap() map[string]any {
 	for i, t := range l.Topics {
 		topicsArray[i] = ([]byte)(t)
 	}
-	return map[string]any{
+	m := map[string]any{
 		"removed":          l.Removed,
 		"logIndex":         (*uint64)(&l.LogIndex),
 		"transactionIndex": (*uint64)(&l.TransactionIndex),
@@ -169,6 +169,10 @@ func (l *LogJSONRPC) FormatMap() map[string]any {
 		"data":             ([]byte)(l.Data),
 		"topics":           topicsArray,
 	}
+	if l.BlockTimestamp != nil {
+		m["blockTimestamp"] = (*uint64)(l.BlockTimestamp)
+	}
+	return m
 }
 
 func (l *LogJSONRPC) MarshalFormat(jss *JSONSerializerSet, opts ...MarshalOption) (json.RawMessage, error) {

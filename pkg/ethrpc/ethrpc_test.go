@@ -188,6 +188,20 @@ func TestFormatLog(t *testing.T) {
 		"logIndex": "0x0",
 		"removed": false
 	}`, string(ethSerialized))
+
+	var formatted map[string]any
+	err = json.Unmarshal(ethSerialized, &formatted)
+	require.NoError(t, err)
+	_, hasBlockTimestamp := formatted["blockTimestamp"]
+	require.False(t, hasBlockTimestamp)
+
+	ts := ethtypes.HexUint64(0x6553f100)
+	receipt.Logs[0].BlockTimestamp = &ts
+	ethSerialized, err = receipt.Logs[0].MarshalFormat(jss)
+	require.NoError(t, err)
+	err = json.Unmarshal(ethSerialized, &formatted)
+	require.NoError(t, err)
+	require.Equal(t, "0x6553f100", formatted["blockTimestamp"])
 }
 
 func TestFormatReceipt(t *testing.T) {
