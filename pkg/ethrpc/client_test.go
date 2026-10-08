@@ -494,3 +494,74 @@ func TestClientConcurrentConnectAndClose(t *testing.T) {
 	assert.Equal(t, 1, mWS.unsubs)
 	assert.LessOrEqual(t, mWS.connections, 1)
 }
+
+// singleRPC only implements rpcbackend.RPC, so has no batch support
+type singleRPC struct {
+	calls []string
+	mux   sync.Mutex
+}
+
+func (s *singleRPC) CallRPC(_ context.Context, result interface{}, method string, _ ...interface{}) *rpcbackend.RPCError {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+	s.calls = append(s.calls, method)
+	if method == "eth_fail" {
+		return &rpcbackend.RPCError{Message: "pop"}
+	}
+	*(result.(*string)) = method
+	return nil
+}
+
+func TestClientCallRPCBatchEmpty(t *testing.T) {
+	c, mHTTP, mWS := newTestClient(t, RoutingModeAuto)
+	assert.Nil(t, c.CallRPCBatch(context.Background()))
+	mHTTP.AssertExpectations(t)
+	mWS.AssertExpectations(t)
+}
+
+func TestClientCallRPCBatchSameBackend(t *testing.T) {
+	c, mHTTP, mWS := newTestClient(t, RoutingModeAuto)
+	ops := []*rpcbackend.RPCBatchOp{
+		{Method: "eth_sendRawTransaction", Params: []interface{}{"0x01"}},
+		{Method: "eth_sendRawTransaction", Params: []interface{}{"0x02"}},
+	}
+	batchErrs := []*rpcbackend.RPCError{nil, {Message: "pop"}}
+	mHTTP.On("CallRPCBatch", mock.Anything, ops[0], ops[1]).Return(batchErrs).Once()
+
+	assert.Equal(t, batchErrs, c.CallRPCBatch(context.Background(), ops...))
+	mHTTP.AssertExpectations(t)
+	mWS.AssertExpectations(t)
+}
+
+func TestClientCallRPCBatchMixedBackendsFallsBack(t *testing.T) {
+	c, mHTTP, mWS := newTestClient(t, RoutingModeAuto)
+	mHTTP.On("CallRPC", mock.Anything, mock.Anything, "eth_sendRawTransaction", "0x01").Return(nil).Once()
+	mWS.On("CallRPC", mock.Anything, mock.Anything, "eth_getLogs").Return(&rpcbackend.RPCError{Message: "pop"}).Once()
+
+	errs := c.CallRPCBatch(context.Background(),
+		&rpcbackend.RPCBatchOp{Method: "eth_sendRawTransaction", Params: []interface{}{"0x01"}},
+		&rpcbackend.RPCBatchOp{Method: "eth_getLogs"},
+	)
+	require.Len(t, errs, 2)
+	assert.Nil(t, errs[0])
+	assert.Equal(t, "pop", errs[1].Message)
+	mHTTP.AssertExpectations(t)
+	mWS.AssertExpectations(t)
+}
+
+func TestClientCallRPCBatchNoBatchSupportFallsBack(t *testing.T) {
+	backend := &singleRPC{}
+	c, err := NewClientWithBackends(context.Background(), RoutingModeHTTP, backend, nil)
+	require.NoError(t, err)
+
+	var res1, res2 string
+	errs := c.CallRPCBatch(context.Background(),
+		&rpcbackend.RPCBatchOp{Method: "eth_one", Result: &res1},
+		&rpcbackend.RPCBatchOp{Method: "eth_fail", Result: &res2},
+	)
+	require.Len(t, errs, 2)
+	assert.Nil(t, errs[0])
+	assert.Equal(t, "eth_one", res1)
+	assert.Equal(t, "pop", errs[1].Message)
+	assert.ElementsMatch(t, []string{"eth_one", "eth_fail"}, backend.calls)
+}
