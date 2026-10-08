@@ -108,7 +108,7 @@ var wsRoutedMethodsLegacy = map[string]bool{
 //
 // If Connect() is not called, every call routes to HTTP regardless of mode.
 type Client interface {
-	rpcbackend.RPC
+	rpcbackend.BatchRPC
 
 	// Connect establishes the WebSocket connection if one is configured, and is a no-op
 	// otherwise. It is idempotent so can be called multiple times, but fails after Close.
@@ -214,6 +214,37 @@ func (c *client) routeFor(method string) rpcbackend.RPC {
 
 func (c *client) CallRPC(ctx context.Context, result interface{}, method string, params ...interface{}) *rpcbackend.RPCError {
 	return c.routeFor(method).CallRPC(ctx, result, method, params...)
+}
+
+// CallRPCBatch sends the ops as a single JSON/RPC batch request when they all route to the
+// same connection and that connection supports batching. Otherwise each op is sent as its own CallRPC, concurrently.
+// (the signer HTTP backend supports batching, its WebSocket backend does not yet)
+func (c *client) CallRPCBatch(ctx context.Context, ops ...*rpcbackend.RPCBatchOp) []*rpcbackend.RPCError {
+	if len(ops) == 0 {
+		return nil
+	}
+	backend := c.routeFor(ops[0].Method)
+	sameBackend := true
+	for _, op := range ops[1:] {
+		if c.routeFor(op.Method) != backend {
+			sameBackend = false
+			break
+		}
+	}
+	if batchBackend, ok := backend.(rpcbackend.BatchRPC); ok && sameBackend {
+		return batchBackend.CallRPCBatch(ctx, ops...)
+	}
+	errs := make([]*rpcbackend.RPCError, len(ops))
+	var wg sync.WaitGroup
+	for i, op := range ops {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = c.CallRPC(ctx, op.Result, op.Method, op.Params...)
+		}()
+	}
+	wg.Wait()
+	return errs
 }
 
 func (c *client) Connect() error {
