@@ -7,14 +7,14 @@ toolchain go1.26.4
 require (
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/golang-lru v1.0.2
-	github.com/hyperledger-firefly/common v1.6.5
+	github.com/hyperledger-firefly/common v1.6.7
 	github.com/hyperledger-firefly/signer v1.2.2-0.20260914155424-cfafd71fb4d2
 	github.com/hyperledger-firefly/transaction-manager v1.5.4
 	github.com/sirupsen/logrus v1.10.2
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
-	golang.org/x/net v0.59.0
-	golang.org/x/text v0.42.0
+	golang.org/x/net v0.61.0
+	golang.org/x/text v0.43.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -80,9 +80,9 @@ require (
 	github.com/x-cray/logrus-prefixed-formatter v0.5.2 // indirect
 	gitlab.com/hfuss/mux-prometheus v0.0.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
