@@ -31,6 +31,7 @@ import (
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
 	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/metric"
 	"github.com/hyperledger-firefly/common/pkg/retry"
 	"github.com/hyperledger-firefly/common/pkg/wsclient"
 	"github.com/hyperledger-firefly/evmconnect/internal/msgs"
@@ -75,6 +76,9 @@ type Connector interface {
 
 	// Get the high level block listener functionality, which provides a view of the head of the chain
 	BlockListener() ethblocklistener.BlockListener
+
+	// RegisterListenerMetrics emits the checkpoint position of each event listener into the metrics registry
+	RegisterListenerMetrics(registry metric.MetricsRegistry)
 }
 
 // NewEthereumConnector builds the JSON/RPC client from configuration, and the connector over it.
