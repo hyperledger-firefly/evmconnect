@@ -614,11 +614,11 @@ func TestBlockListenerWSShoulderTap(t *testing.T) {
 
 	failedConnectOnce := false
 	failedSubOnce := false
-	toServer, fromServer, url, wsDone := wsclient.NewTestWSServer(func(req *http.Request) {
-		if !failedConnectOnce {
-			failedConnectOnce = true
-			panic("fail once here")
-		}
+	var rejectNext func(bool)
+	connections, url, rejectNext, wsDone := wsclient.NewTestWSServerMulti(func(req *http.Request) {
+		// Reject the first connect attempt with a 500, accept the rest
+		rejectNext(!failedConnectOnce)
+		failedConnectOnce = true
 	})
 
 	ctx, bl, _, done := newTestBlockListener(t)
@@ -638,8 +638,12 @@ func TestBlockListenerWSShoulderTap(t *testing.T) {
 	complete := false
 	go func() {
 		defer close(svrDone)
+		var conn *wsclient.TestWSConnection
+		var toServer chan string
 		for {
 			select {
+			case conn = <-connections:
+				toServer = conn.ToServer
 			case rpcStr := <-toServer:
 				var rpcReq rpcbackend.RPCRequest
 				err := json.Unmarshal([]byte(rpcStr), &rpcReq)
@@ -687,7 +691,7 @@ func TestBlockListenerWSShoulderTap(t *testing.T) {
 				}
 				b, err := json.Marshal(rpcRes)
 				assert.NoError(t, err)
-				fromServer <- string(b)
+				conn.FromServer <- string(b)
 			case <-ctx.Done():
 				return
 			}

@@ -37,6 +37,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -74,7 +75,7 @@
 |gasEstimationFactor|The factor to apply to the gas estimation to determine the gas limit|`float32`|`1.5`
 |headers|Adds custom headers to HTTP requests|`map[string]string`|`<nil>`
 |hederaCompatibilityMode|Compatibility mode for Hedera, allowing non-standard block header hashes to be processed|`boolean`|`false`
-|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`475ms`
+|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`4750ms`
 |maxAsyncBlockFetchConcurrency|Maximum concurrency when using asynchronous block downloading (minium 1)|`int`|`25`
 |maxConcurrentRequests|Maximum of concurrent requests to be submitted to the blockchain|`int`|`50`
 |maxConnsPerHost|The max number of connections, per unique hostname. Zero means no limit|`int`|`0`
@@ -172,6 +173,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -182,6 +184,8 @@
 |Key|Description|Type|Default Value|
 |---|-----------|----|-------------|
 |backgroundConnect|When true the connection is established in the background with infinite reconnect (makes initialConnectAttempts redundant when set)|`boolean`|`false`
+|connectionCycleInterval|When non-zero, the client proactively replaces its WebSocket connection on this interval - the new connection is fully established (including post-connect setup) before the old one is quiesced and closed|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
+|connectionCycleQuiesceTime|The amount of time the old WebSocket connection continues to deliver inbound messages after a connection cycle switches sending to the new connection, before it is closed|[`time.Duration`](https://pkg.go.dev/time#Duration)|`5s`
 |connectionTimeout|The amount of time to wait while establishing a connection (or auto-reconnection)|[`time.Duration`](https://pkg.go.dev/time#Duration)|`45s`
 |enabled|When true a WebSocket is established for block listening, in addition to the HTTP RPC connections used for other functions|`boolean`|`false`
 |heartbeatInterval|The amount of time to wait between heartbeat signals on the WebSocket connection|[`time.Duration`](https://pkg.go.dev/time#Duration)|`30s`
@@ -237,6 +241,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -335,6 +340,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -376,6 +382,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -449,7 +456,7 @@
 |connectionTimeout|The maximum amount of time that a connection is allowed to remain with no data transmitted|[`time.Duration`](https://pkg.go.dev/time#Duration)|`30s`
 |expectContinueTimeout|See [ExpectContinueTimeout in the Go docs](https://pkg.go.dev/net/http#Transport)|[`time.Duration`](https://pkg.go.dev/time#Duration)|`1s`
 |headers|Adds custom headers to HTTP requests|`map[string]string`|`<nil>`
-|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`475ms`
+|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`4750ms`
 |maxConnsPerHost|The max number of connections, per unique hostname. Zero means no limit|`int`|`0`
 |maxIdleConns|The max number of idle connections to hold pooled|`int`|`100`
 |maxIdleConnsPerHost|The max number of idle connections, per unique hostname. Zero means net/http uses the default of only 2.|`int`|`100`
@@ -515,6 +522,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -564,7 +572,7 @@
 |connectionTimeout|The maximum amount of time that a connection is allowed to remain with no data transmitted|[`time.Duration`](https://pkg.go.dev/time#Duration)|`30s`
 |expectContinueTimeout|See [ExpectContinueTimeout in the Go docs](https://pkg.go.dev/net/http#Transport)|[`time.Duration`](https://pkg.go.dev/time#Duration)|`1s`
 |headers|Adds custom headers to HTTP requests|`map[string]string`|`<nil>`
-|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`475ms`
+|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`4750ms`
 |maxConnsPerHost|The max number of connections, per unique hostname. Zero means no limit|`int`|`0`
 |maxIdleConns|The max number of idle connections to hold pooled|`int`|`100`
 |maxIdleConnsPerHost|The max number of idle connections, per unique hostname. Zero means net/http uses the default of only 2.|`int`|`100`
@@ -630,6 +638,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -651,7 +660,7 @@
 |connectionTimeout|The maximum amount of time that a connection is allowed to remain with no data transmitted|[`time.Duration`](https://pkg.go.dev/time#Duration)|`30s`
 |expectContinueTimeout|See [ExpectContinueTimeout in the Go docs](https://pkg.go.dev/net/http#Transport)|[`time.Duration`](https://pkg.go.dev/time#Duration)|`1s`
 |headers|Adds custom headers to HTTP requests|`map[string]string`|`<nil>`
-|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`475ms`
+|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`4750ms`
 |maxConnsPerHost|The max number of connections, per unique hostname. Zero means no limit|`int`|`0`
 |maxIdleConns|The max number of idle connections to hold pooled|`int`|`100`
 |maxIdleConnsPerHost|The max number of idle connections, per unique hostname. Zero means net/http uses the default of only 2.|`int`|`100`
@@ -712,6 +721,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
